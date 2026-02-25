@@ -196,7 +196,7 @@ def setup_prediction_graph(
     tx: pl.DataFrame,
     bd: gpd.GeoDataFrame,
     max_k: int,
-    buffer_ratio: float,
+    scale_factor: float,
     mode: Literal['nucleus', 'cell', 'uniform'] = 'cell',
     use_3d: bool | Literal["auto"] = False,
 ) -> torch.Tensor:
@@ -232,12 +232,24 @@ def setup_prediction_graph(
         return edge_index
     
     # Shape-based graph
+    from shapely.affinity import scale as shapely_scale
+
     points = tx[[tx_fields.x, tx_fields.y]].to_numpy()
     boundary_type = (bd_fields.cell_value if mode == "cell"
                      else bd_fields.nucleus_value)
     polygons = bd[bd[bd_fields.boundary_type] == boundary_type].geometry
-    buffer_dists = np.sqrt(polygons.area / np.pi) * buffer_ratio
-    polygons = polygons.buffer(buffer_dists).reset_index(drop=True)
+
+    # Multiplicative polygon scaling around centroid.
+    # scale_factor > 1 expands, < 1 shrinks.
+    polygons = polygons.apply(
+        lambda geom: shapely_scale(
+            geom,
+            xfact=scale_factor,
+            yfact=scale_factor,
+            origin="centroid",
+        )
+    ).reset_index(drop=True)
+
     result = points_in_polygons(
         points=points,
         polygons=polygons,

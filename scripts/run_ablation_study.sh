@@ -110,9 +110,10 @@ fi
 
 # -------------------------------------------------------------------------
 # Anchor configuration (defaults matching current best config)
+# Expansion is interpreted as multiplicative scale factor.
 # -------------------------------------------------------------------------
 ANCHOR_USE_3D="${ANCHOR_USE_3D:-true}"
-ANCHOR_EXPANSION="${ANCHOR_EXPANSION:-2.5}"
+ANCHOR_EXPANSION="${ANCHOR_EXPANSION:-2.2}"
 ANCHOR_TX_K="${ANCHOR_TX_K:-5}"
 ANCHOR_TX_DIST="${ANCHOR_TX_DIST:-20}"
 ANCHOR_N_LAYERS="${ANCHOR_N_LAYERS:-2}"
@@ -131,6 +132,9 @@ ANCHOR_POS_EMB="${ANCHOR_POS_EMB:-true}"
 ANCHOR_NORM_EMB="${ANCHOR_NORM_EMB:-true}"
 ANCHOR_CELLS_REP="${ANCHOR_CELLS_REP:-pca}"
 ANCHOR_LR="${ANCHOR_LR:-1e-3}"
+
+echo "[$(timestamp)] Expansion mode: scale_factor"
+echo "[$(timestamp)] Anchor expansion scale=${ANCHOR_EXPANSION}"
 
 # -------------------------------------------------------------------------
 # Block toggles
@@ -669,7 +673,7 @@ run_job() {
   {
     echo "=================================================================="
     echo "[$(timestamp)] START job=${job_name} gpu=${gpu}"
-    echo "params: use3d=${use_3d} expansion=${expansion} tx_k=${tx_k} tx_dist=${tx_dist} layers=${n_layers} heads=${n_heads} cells_min=${cells_min_counts} min_qv=${min_qv} align=${alignment_loss} sg_loss=${sg_loss_type} hidden=${hidden_channels} out=${out_channels} tx_w=${tx_weight_end} bd_w=${bd_weight_end} sg_w=${sg_weight_end} align_w=${alignment_weight_end} pos_emb=${positional_embeddings} norm_emb=${normalize_embeddings} cells_rep=${cells_representation} lr=${learning_rate} pred_mode=${job_prediction_mode} timeout_min=${SEGMENT_TIMEOUT_MIN}"
+    echo "params: use3d=${use_3d} expansion_scale=${expansion} tx_k=${tx_k} tx_dist=${tx_dist} layers=${n_layers} heads=${n_heads} cells_min=${cells_min_counts} min_qv=${min_qv} align=${alignment_loss} sg_loss=${sg_loss_type} hidden=${hidden_channels} out=${out_channels} tx_w=${tx_weight_end} bd_w=${bd_weight_end} sg_w=${sg_weight_end} align_w=${alignment_weight_end} pos_emb=${positional_embeddings} norm_emb=${normalize_embeddings} cells_rep=${cells_representation} lr=${learning_rate} pred_mode=${job_prediction_mode} timeout_min=${SEGMENT_TIMEOUT_MIN}"
   } | tee -a "${log_file}" >/dev/null
 
   if [[ "${RESUME_IF_EXISTS}" == "1" ]] && \
@@ -701,7 +705,7 @@ run_job() {
       -o "${seg_dir}"
       --n-epochs "${N_EPOCHS}"
       --prediction-mode "${job_prediction_mode}"
-      --prediction-expansion-ratio "${expansion}"
+      --prediction-scale-factor "${expansion}"
       --cells-min-counts "${cells_min_counts}"
       --min-qv "${min_qv}"
       --use-3d "${use_3d}"

@@ -78,8 +78,9 @@ if [[ "${ALIGNMENT_SCRNA_REFERENCE_PATH}" == "data/ref_pancreas.h5ad" ]] && \
 fi
 
 # Baseline values (legacy baseline).
+# Expansion values are interpreted as multiplicative scale factors.
 BASE_USE_3D="${BASE_USE_3D:-true}"
-BASE_EXPANSION_RATIO="${BASE_EXPANSION_RATIO:-2.0}"
+BASE_EXPANSION_RATIO="${BASE_EXPANSION_RATIO:-2.2}"
 BASE_TX_MAX_K="${BASE_TX_MAX_K:-5}"
 BASE_TX_MAX_DIST="${BASE_TX_MAX_DIST:-5}"
 BASE_N_MID_LAYERS="${BASE_N_MID_LAYERS:-2}"
@@ -89,7 +90,7 @@ BASE_MIN_QV="${BASE_MIN_QV:-0}"
 
 # Robust anchor values (derived from current validation trends).
 ANCHOR_USE_3D="${ANCHOR_USE_3D:-true}"
-ANCHOR_EXPANSION_RATIO="${ANCHOR_EXPANSION_RATIO:-2.5}"
+ANCHOR_EXPANSION_RATIO="${ANCHOR_EXPANSION_RATIO:-2.2}"
 ANCHOR_TX_MAX_K="${ANCHOR_TX_MAX_K:-5}"
 ANCHOR_TX_MAX_DIST="${ANCHOR_TX_MAX_DIST:-20}"
 ANCHOR_N_MID_LAYERS="${ANCHOR_N_MID_LAYERS:-2}"
@@ -107,12 +108,14 @@ RUN_INTERACTION_GRID="${RUN_INTERACTION_GRID:-1}"
 RUN_STRESS_TESTS="${RUN_STRESS_TESTS:-1}"
 
 # Interaction grid around high-performing region.
-INTERACTION_EXPANSIONS=(2.5 3.0)
+INTERACTION_EXPANSIONS=(2.2 2.5)
 INTERACTION_TX_DISTS=(10 20)
 INTERACTION_HEADS=(2 4)
 
 # Alignment ablation subset.
 INTERACTION_ALIGN_VALUES=(true false)
+echo "[$(timestamp)] Expansion mode: scale_factor"
+echo "[$(timestamp)] Baseline scale=${BASE_EXPANSION_RATIO} | Anchor scale=${ANCHOR_EXPANSION_RATIO}"
 
 if ! [[ "${STABILITY_REPEATS}" =~ ^[0-9]+$ ]] || [[ "${STABILITY_REPEATS}" -lt 1 ]]; then
   echo "ERROR: STABILITY_REPEATS must be a positive integer. Got: ${STABILITY_REPEATS}"
@@ -472,7 +475,7 @@ run_job() {
   {
     echo "=================================================================="
     echo "[$(timestamp)] START job=${job_name} gpu=${gpu}"
-    echo "params: use3d=${use_3d} expansion=${expansion} tx_k=${tx_k} tx_dist=${tx_dist} layers=${n_layers} heads=${n_heads} cells_min=${cells_min_counts} min_qv=${min_qv} align=${alignment_loss} timeout_min=${SEGMENT_TIMEOUT_MIN} dl_workers=${SEGMENT_NUM_WORKERS} anc_retry_workers=${SEGMENT_ANC_RETRY_WORKERS} sharing=${TORCH_SHARING_STRATEGY}"
+    echo "params: use3d=${use_3d} expansion_scale=${expansion} tx_k=${tx_k} tx_dist=${tx_dist} layers=${n_layers} heads=${n_heads} cells_min=${cells_min_counts} min_qv=${min_qv} align=${alignment_loss} timeout_min=${SEGMENT_TIMEOUT_MIN} dl_workers=${SEGMENT_NUM_WORKERS} anc_retry_workers=${SEGMENT_ANC_RETRY_WORKERS} sharing=${TORCH_SHARING_STRATEGY}"
   } | tee -a "${log_file}" >/dev/null
 
   if [[ "${RESUME_IF_EXISTS}" == "1" ]] && \
@@ -494,7 +497,7 @@ run_job() {
       -o "${seg_dir}"
       --n-epochs "${N_EPOCHS}"
       --prediction-mode "${PREDICTION_MODE}"
-      --prediction-expansion-ratio "${expansion}"
+      --prediction-scale-factor "${expansion}"
       --cells-min-counts "${cells_min_counts}"
       --min-qv "${min_qv}"
       --use-3d "${use_3d}"

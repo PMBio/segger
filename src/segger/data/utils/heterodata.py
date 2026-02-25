@@ -24,7 +24,7 @@ def setup_heterodata(
     transcripts_graph_max_dist: float,
     prediction_graph_mode: Literal["nucleus", "cell", "uniform"],
     prediction_graph_max_k: int,
-    prediction_graph_buffer_ratio: float,
+    prediction_graph_scale_factor: float,
     use_3d: bool | Literal["auto"] = False,
     me_gene_pairs: list[tuple[str, str]] | None = None,
     cells_embedding_key: str = 'X_pca',
@@ -173,7 +173,7 @@ def setup_heterodata(
         transcripts,
         boundaries,
         max_k=prediction_graph_max_k,
-        buffer_ratio=prediction_graph_buffer_ratio,
+        scale_factor=prediction_graph_scale_factor,
         mode=prediction_graph_mode,
         use_3d=use_3d if prediction_graph_mode == "uniform" else False,
     )

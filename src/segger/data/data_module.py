@@ -141,8 +141,9 @@ class ISTDataModule(LightningDataModule):
         Graph structure used during prediction.
     prediction_graph_max_k : int, default=3
         Maximum number of edges per transcript for prediction graphs.
-    prediction_graph_max_dist : float, default=1.0
-        Maximum distance for edges in prediction graphs.
+    prediction_graph_scale_factor : float, default=1.2
+        Multiplicative scale factor for boundary polygons in prediction graph
+        construction. Values > 1 expand, values < 1 shrink.
     tiling_mode : {"adaptive", "square"}, default="adaptive"
         Strategy for spatial graph tiling (adaptive quadtree or grid).
     tiling_margin_training : float, default=20.0
@@ -174,7 +175,7 @@ class ISTDataModule(LightningDataModule):
     segmentation_graph_negative_edge_rate: float = 1.
     prediction_graph_mode: Literal["nucleus", "cell", "uniform"] = "cell"
     prediction_graph_max_k: int = 3
-    prediction_graph_buffer_ratio: float = 0.05
+    prediction_graph_scale_factor: float = 1.2
     use_3d: bool | Literal["auto"] = False
     min_qv: Optional[float] = 20.0
     alignment_loss: bool = False
@@ -346,7 +347,7 @@ class ISTDataModule(LightningDataModule):
             transcripts_graph_max_dist=self.transcripts_graph_max_dist,
             prediction_graph_mode=self.prediction_graph_mode,
             prediction_graph_max_k=self.prediction_graph_max_k,
-            prediction_graph_buffer_ratio=self.prediction_graph_buffer_ratio,
+            prediction_graph_scale_factor=self.prediction_graph_scale_factor,
             use_3d=self.use_3d,
             me_gene_pairs=self.me_gene_pairs,
         )

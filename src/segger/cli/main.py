@@ -99,7 +99,6 @@ def _resolve_use_3d_flag(use_3d: Literal["auto", "true", "false"]) -> bool | str
         return "auto"
     return use_3d == "true"
 
-
 def _load_checkpoint_datamodule_hparams(checkpoint_path: Path) -> dict:
     """Load datamodule kwargs from checkpoint metadata."""
     import torch
@@ -216,11 +215,11 @@ def segment(
         group=group_prediction,
     )] = registry.get_default("prediction_graph_max_k"),
 
-    prediction_expansion_ratio: Annotated[float | None, registry.get_parameter(
-        "prediction_graph_buffer_ratio",
+    prediction_scale_factor: Annotated[float | None, Parameter(
+        help="Scale factor for prediction polygons. >1.0 expands, <1.0 shrinks.",
         validator=validators.Number(gt=0),
         group=group_prediction,
-    )] = registry.get_default("prediction_graph_buffer_ratio"),
+    )] = 2.2,
 
     # Tiling
     tiling_margin_training: Annotated[float, registry.get_parameter(
@@ -427,7 +426,7 @@ def segment(
         transcripts_graph_max_dist=transcripts_max_dist,
         prediction_graph_mode=prediction_mode,
         prediction_graph_max_k=prediction_max_k,
-        prediction_graph_buffer_ratio=prediction_expansion_ratio,
+        prediction_graph_scale_factor=prediction_scale_factor,
         tiling_margin_training=tiling_margin_training,
         tiling_margin_prediction=tiling_margin_prediction,
         tiling_nodes_per_tile=max_nodes_per_tile,
@@ -492,16 +491,8 @@ def segment(
     # Training
     trainer.fit(model=model, datamodule=datamodule)
 
-    # Prediction
-    prediction_ckpt_path = checkpoint_callback.last_model_path or None
-    if prediction_ckpt_path:
-        predictions = trainer.predict(
-            model=model,
-            datamodule=datamodule,
-            ckpt_path=prediction_ckpt_path,
-        )
-    else:
-        predictions = trainer.predict(model=model, datamodule=datamodule)
+    # Prediction: use in-memory model directly to avoid checkpoint reload.
+    predictions = trainer.predict(model=model, datamodule=datamodule)
 
     writer.write_on_epoch_end(
         trainer=trainer,

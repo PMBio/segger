@@ -37,7 +37,7 @@ Runs a **one-factor-at-a-time (OFAT)** sensitivity analysis. Starting from a fix
 | Parameter | Value | Meaning |
 |-----------|-------|---------|
 | `use_3d` | `true` | Include z-coordinate in graph construction |
-| `expansion_ratio` | `2.0` | Scale factor for boundary polygons (captures edge transcripts) |
+| `scale_factor` | `2.2` | Scale factor for boundary polygons (captures edge transcripts) |
 | `tx_max_k` | `5` | Max k-nearest-neighbors per transcript node |
 | `tx_max_dist` | `5` | Max distance (microns) for tx-tx edges |
 | `n_mid_layers` | `2` | Number of GNN message-passing layers |
@@ -52,7 +52,7 @@ Each axis varies one parameter while the rest stay at baseline:
 | Axis | Values tested | Why |
 |------|--------------|-----|
 | **use_3d** | `false`, `true` | Does z-coordinate information improve segmentation? Xenium captures z-stacks, but not all platforms do. Tests whether the model benefits from 3D spatial context. |
-| **expansion_ratio** | 1.0, 1.5, 2.0, 2.5, 3.0 | Controls how far beyond the nucleus boundary Segger looks for transcripts. Too small = misses cytoplasmic transcripts (low sensitivity). Too large = captures transcripts from neighboring cells (low specificity / high contamination). |
+| **scale_factor** | 1.0, 1.5, 2.0, 2.2, 2.5, 3.0 | Controls how far beyond the nucleus boundary Segger looks for transcripts. Too small = misses cytoplasmic transcripts (low sensitivity). Too large = captures transcripts from neighboring cells (low specificity / high contamination). |
 | **tx_max_k** | 5, 10, 20 | How many transcript neighbors each node connects to. More neighbors = richer local context for the GNN but higher memory/compute cost and potential for over-smoothing. |
 | **tx_max_dist** | 3, 5, 10, 20 | Maximum edge distance for tx-tx connections. Interacts with tissue density -- sparse tissue needs larger distances, dense tissue smaller. Affects the receptive field of the GNN. |
 | **n_mid_layers** | 1, 2, 3 | Depth of the GNN. Deeper = larger receptive field but risk of over-smoothing. For cell-level segmentation, 1-3 layers is the typical range. |
@@ -94,16 +94,16 @@ Runs the **same** configuration multiple times (default 3 repeats) to measure ru
 
 **Why:** GNN training involves stochastic initialization and mini-batch sampling. If the same hyperparameters produce wildly different metrics across runs, we can't trust the parameter sweep results. Stability repeats give us error bars.
 
-The **anchor** configuration (expansion=2.5, tx_dist=20, n_heads=4) represents the "current best" derived from early validation trends, distinct from the legacy baseline.
+The **anchor** configuration (scale_factor=2.2, tx_dist=20, n_heads=4) represents the "current best" derived from early validation trends, distinct from the legacy baseline.
 
 ### Block B: Interaction Grid
 
 Tests **combinations** of the most impactful parameters simultaneously:
 
-- `expansion_ratio` x `tx_max_dist` x `n_heads` (2 x 2 x 2 = 8 combinations with alignment=true)
+- `scale_factor` x `tx_max_dist` x `n_heads` (2 x 2 x 2 = 8 combinations with alignment=true)
 - Plus alignment ablation at each corner (expansion x dist with heads=4, alignment=false): 4 more jobs
 
-**Why:** The OFAT sweep can't detect interactions. For example, a larger expansion ratio might only help when combined with a larger tx_max_dist (because expanded boundaries need longer-range edges to connect properly). This grid covers the "high-performing region" identified by the sweep -- it's not exhaustive but targets where interactions are most likely to matter.
+**Why:** The OFAT sweep can't detect interactions. For example, a larger scale factor might only help when combined with a larger tx_max_dist (because expanded boundaries need longer-range edges to connect properly). This grid covers the "high-performing region" identified by the sweep -- it's not exhaustive but targets where interactions are most likely to matter.
 
 The alignment ablation within the grid specifically tests: **does the ME-gene loss help or hurt at different graph configurations?** If the loss only helps in some regimes, that's critical to know.
 
@@ -150,7 +150,7 @@ All ablation jobs start from the current best ("anchor") configuration and modif
 | Parameter | Anchor value |
 |-----------|-------------|
 | `use_3d` | `true` |
-| `expansion_ratio` | `2.5` |
+| `scale_factor` | `2.2` |
 | `tx_max_k` | `5` |
 | `tx_max_dist` | `20` |
 | `n_mid_layers` | `2` |
@@ -337,14 +337,14 @@ Generates a publication-quality multi-page PDF:
 
 Segger frames cell segmentation as **link prediction on a heterogeneous graph**. The quality of segmentation depends on:
 
-1. **Graph topology** -- which transcripts and boundaries are connected (controlled by `expansion_ratio`, `tx_max_k`, `tx_max_dist`, `use_3d`)
+1. **Graph topology** -- which transcripts and boundaries are connected (controlled by `scale_factor`, `tx_max_k`, `tx_max_dist`, `use_3d`)
 2. **Model capacity** -- how the GNN processes the graph (controlled by `n_mid_layers`, `n_heads`)
 3. **Training signal** -- what the loss function optimizes (controlled by `alignment_loss`)
 4. **Post-processing** -- how results are filtered (controlled by `cells_min_counts`)
 
 The experiments systematically vary each of these four aspects:
 
-- **OFAT sweep** identifies which knobs matter most (often expansion ratio and tx_max_dist dominate)
+- **OFAT sweep** identifies which knobs matter most (often scale factor and tx_max_dist dominate)
 - **Interaction grid** checks if the top parameters synergize or conflict
 - **Stability repeats** quantify noise so we know if a 2% MECR improvement is real or random
 - **Stress tests** reveal failure modes for the recommended configuration

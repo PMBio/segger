@@ -76,7 +76,7 @@ fi
 
 # Baseline values (matches the command you provided).
 BASE_USE_3D="${BASE_USE_3D:-true}"
-BASE_EXPANSION_RATIO="${BASE_EXPANSION_RATIO:-2.0}"
+BASE_EXPANSION_RATIO="${BASE_EXPANSION_RATIO:-2.2}"
 BASE_TX_MAX_K="${BASE_TX_MAX_K:-5}"
 BASE_TX_MAX_DIST="${BASE_TX_MAX_DIST:-5}"
 BASE_N_MID_LAYERS="${BASE_N_MID_LAYERS:-2}"
@@ -85,14 +85,17 @@ BASE_CELLS_MIN_COUNTS="${BASE_CELLS_MIN_COUNTS:-5}"
 BASE_MIN_QV="${BASE_MIN_QV:-0}"
 
 # One-factor-at-a-time sweep values around baseline.
+# Values are interpreted as multiplicative scale factors.
 USE_3D_VALUES=(false true)
-EXPANSION_VALUES=(1 1.5 2.0 2.5 3.0)
+EXPANSION_VALUES=(1 1.5 2.0 2.2 2.5 3.0)
 TX_MAX_K_VALUES=(5 10 20)
 TX_MAX_DIST_VALUES=(3 5 10 20)
 N_MID_LAYER_VALUES=(1 2 3)
 N_HEAD_VALUES=(2 4 8)
 CELLS_MIN_COUNTS_VALUES=(3 5 10)
 ALIGNMENT_VALUES=(false true)
+echo "[$(timestamp)] Expansion mode: scale_factor"
+echo "[$(timestamp)] Baseline expansion scale=${BASE_EXPANSION_RATIO}"
 
 RUNS_DIR="${OUTPUT_ROOT}/runs"
 EXPORTS_DIR="${OUTPUT_ROOT}/exports"
@@ -425,7 +428,7 @@ run_job() {
   {
     echo "=================================================================="
     echo "[$(timestamp)] START job=${job_name} gpu=${gpu}"
-    echo "params: use3d=${use_3d} expansion=${expansion} tx_k=${tx_k} tx_dist=${tx_dist} layers=${n_layers} heads=${n_heads} cells_min=${cells_min_counts} min_qv=${min_qv} align=${alignment_loss} timeout_min=${SEGMENT_TIMEOUT_MIN} dl_workers=${SEGMENT_NUM_WORKERS} anc_retry_workers=${SEGMENT_ANC_RETRY_WORKERS} sharing=${TORCH_SHARING_STRATEGY}"
+    echo "params: use3d=${use_3d} expansion_scale=${expansion} tx_k=${tx_k} tx_dist=${tx_dist} layers=${n_layers} heads=${n_heads} cells_min=${cells_min_counts} min_qv=${min_qv} align=${alignment_loss} timeout_min=${SEGMENT_TIMEOUT_MIN} dl_workers=${SEGMENT_NUM_WORKERS} anc_retry_workers=${SEGMENT_ANC_RETRY_WORKERS} sharing=${TORCH_SHARING_STRATEGY}"
   } | tee -a "${log_file}" >/dev/null
 
   if [[ "${RESUME_IF_EXISTS}" == "1" ]] && \
@@ -447,7 +450,7 @@ run_job() {
       -o "${seg_dir}"
       --n-epochs "${N_EPOCHS}"
       --prediction-mode "${PREDICTION_MODE}"
-      --prediction-expansion-ratio "${expansion}"
+      --prediction-scale-factor "${expansion}"
       --cells-min-counts "${cells_min_counts}"
       --min-qv "${min_qv}"
       --use-3d "${use_3d}"
