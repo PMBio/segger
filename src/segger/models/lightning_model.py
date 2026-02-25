@@ -3,7 +3,7 @@ from torch_geometric.data import Batch
 from lightning import LightningModule
 from torch_scatter import scatter_max
 from torch.nn import functional as F
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import polars as pl
 import pandas as pd
 import numpy as np
@@ -12,9 +12,12 @@ import math
 import os
 
 from .triplet_loss import TripletLoss, MetricLoss
+from .alignment_loss import AlignmentLoss
 from ..io.fields import StandardTranscriptFields
-from ..data.data_module import ISTDataModule
 from .ist_encoder import ISTEncoder
+
+if TYPE_CHECKING:
+    from ..data.data_module import ISTDataModule
 
 class LitISTEncoder(LightningModule):
     """TODO: Description.
@@ -42,6 +45,9 @@ class LitISTEncoder(LightningModule):
         bd_weight_end: float = 1.,
         sg_weight_start: float = 0.,
         sg_weight_end: float = 0.5,
+        align_loss: bool = False,
+        align_weight_start: float = 0.0,
+        align_weight_end: float = 0.03,
         update_gene_embedding: bool = True,
         use_positional_embeddings: bool = True,
         normalize_embeddings: bool = True,
@@ -82,9 +88,13 @@ class LitISTEncoder(LightningModule):
             sg_weight_end,
         ])
         self._freeze_gene_embedding = not update_gene_embedding
+        self._align_loss_enabled = align_loss
+        self._align_weight_start = align_weight_start
+        self._align_weight_end = align_weight_end
 
     def setup(self, stage):
         # LitISTEncoder needs supp. data from ISTDataModule to train
+        from ..data.data_module import ISTDataModule
         if not isinstance(self.trainer.datamodule, ISTDataModule):
             raise TypeError(
                 f"Expected data module to be `ISTDataModule` but got "
@@ -121,6 +131,11 @@ class LitISTEncoder(LightningModule):
             raise ValueError(
                 f"Unrecognized segmentation loss: '{self._sg_loss_type}'. "
                 f"Acceptable values are 'triplet' and 'bce'."
+            )
+        if self._align_loss_enabled:
+            self.loss_align = AlignmentLoss(
+                weight_start=self._align_weight_start,
+                weight_end=self._align_weight_end,
             )
         return super().setup(stage)
 
@@ -206,15 +221,66 @@ class LitISTEncoder(LightningModule):
 
                 loss_sg = self.loss_sg(logits, labels)
 
-        # Compute final weighted combination of losses
+        # Compute optional alignment loss (additive mode only).
+        loss_align = torch.tensor(0.0, device=embeddings['tx'].device)
+        if self._align_loss_enabled:
+            has_align_edges = (
+                ('tx', 'attracts', 'tx') in batch.edge_types
+                and batch['tx', 'attracts', 'tx'].edge_index.size(1) > 0
+            )
+            if has_align_edges:
+                align_edge_index = batch['tx', 'attracts', 'tx'].edge_index
+                align_labels = batch['tx', 'attracts', 'tx'].edge_label
+
+                # Keep all ME negatives and cap positives to stabilize imbalance.
+                pos_mask = align_labels > 0.5
+                neg_mask = ~pos_mask
+                n_pos = int(pos_mask.sum().item())
+                n_neg = int(neg_mask.sum().item())
+                if n_pos > 0 and n_neg > 0:
+                    max_pos = 3 * n_neg
+                    pos_idx = pos_mask.nonzero().flatten()
+                    neg_idx = neg_mask.nonzero().flatten()
+                    if n_pos > max_pos:
+                        pos_idx = pos_idx[
+                            torch.randperm(n_pos, device=pos_idx.device)[:max_pos]
+                        ]
+                    sel = torch.cat([pos_idx, neg_idx], dim=0)
+                    sel = sel[torch.randperm(sel.numel(), device=sel.device)]
+                    align_edge_index = align_edge_index[:, sel]
+                    align_labels = align_labels[sel]
+
+                    src_align, dst_align = align_edge_index
+                    loss_align = self.loss_align(
+                        embeddings['tx'][src_align],
+                        embeddings['tx'][dst_align],
+                        align_labels,
+                    )
+
+        # Compute final weighted combination of primary losses.
         w_tx, w_bd, w_sg = self._scheduled_weights(self._w_start, self._w_end)
         loss = w_tx * loss_tx + w_bd * loss_bd + w_sg * loss_sg
 
-        return loss_tx, loss_bd, loss_sg, loss
+        # Alignment loss is additive only.
+        if self._align_loss_enabled:
+            align_weight = self.loss_align.get_scheduled_weight(
+                self.current_epoch,
+                self.trainer.max_epochs,
+            )
+            loss = loss + align_weight * loss_align
+
+        return loss_tx, loss_bd, loss_sg, loss_align, loss
 
     def training_step(self, batch: Batch, batch_idx: int) -> torch.Tensor:
         """Perform a single training step."""
-        loss_tx, loss_bd, loss_sg, loss = self.get_losses(batch)
+        loss_tx, loss_bd, loss_sg, loss_align, loss = self.get_losses(batch)
+
+        self.log(
+            "train:loss",
+            loss,
+            prog_bar=True,
+            batch_size=batch.num_graphs,
+        )
 
         self.log(
             "train:loss_tx",
@@ -234,11 +300,25 @@ class LitISTEncoder(LightningModule):
             prog_bar=True,
             batch_size=batch.num_graphs,
         )
+        if self._align_loss_enabled:
+            self.log(
+                "train:loss_align",
+                loss_align,
+                prog_bar=True,
+                batch_size=batch.num_graphs,
+            )
         return loss
 
     def validation_step(self, batch: Batch, batch_idx: int) -> torch.Tensor:
         """Defines the validation step."""
-        loss_tx, loss_bd, loss_sg, loss = self.get_losses(batch)
+        loss_tx, loss_bd, loss_sg, loss_align, loss = self.get_losses(batch)
+
+        self.log(
+            "val:loss",
+            loss,
+            prog_bar=True,
+            batch_size=batch.num_graphs,
+        )
 
         self.log(
             "val:loss_tx",
@@ -258,6 +338,13 @@ class LitISTEncoder(LightningModule):
             prog_bar=True,
             batch_size=batch.num_graphs,
         )
+        if self._align_loss_enabled:
+            self.log(
+                "val:loss_align",
+                loss_align,
+                prog_bar=True,
+                batch_size=batch.num_graphs,
+            )
         return loss
     
     def predict_step(
