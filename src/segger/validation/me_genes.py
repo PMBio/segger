@@ -9,6 +9,7 @@ Ported from segger v0.1.0 validation/utils.py.
 """
 
 from typing import Dict, List, Tuple, Optional
+from collections import Counter
 from pathlib import Path
 import warnings
 import json
@@ -17,7 +18,6 @@ import time
 import os
 import numpy as np
 import anndata as ad
-import scanpy as sc
 import pandas as pd
 from itertools import combinations
 
@@ -51,6 +51,8 @@ def find_markers(
             'positive': list of highly expressed genes
             'negative': list of lowly expressed genes
     """
+    import scanpy as sc
+
     markers = {}
     sc.tl.rank_genes_groups(adata, groupby=cell_type_column)
     genes = adata.var_names
@@ -114,7 +116,6 @@ def find_mutually_exclusive_genes(
         List of mutually exclusive gene pairs as (gene1, gene2) tuples.
     """
     exclusive_genes = {}
-    all_exclusive = []
 
     for cell_type, marker_sets in markers.items():
         positive_markers = marker_sets["positive"]
@@ -125,21 +126,33 @@ def find_mutually_exclusive_genes(
                 continue
 
             gene_expr = adata[:, gene].X
-            cell_type_mask = adata.obs[cell_type_column] == cell_type
+            # Use plain NumPy masks for sparse indexing compatibility across
+            # pandas/scipy versions (pandas Series no longer exposes .nonzero()).
+            cell_type_mask = (adata.obs[cell_type_column].to_numpy() == cell_type)
             non_cell_type_mask = ~cell_type_mask
 
             # Check expression thresholds
-            expr_in = (gene_expr[cell_type_mask] > 0).mean()
-            expr_out = (gene_expr[non_cell_type_mask] > 0).mean()
+            if cell_type_mask.any():
+                expr_in = float(np.asarray((gene_expr[cell_type_mask] > 0).mean()).squeeze())
+            else:
+                expr_in = 0.0
+            if non_cell_type_mask.any():
+                expr_out = float(np.asarray((gene_expr[non_cell_type_mask] > 0).mean()).squeeze())
+            else:
+                expr_out = 0.0
 
             if expr_in > expr_threshold_in and expr_out < expr_threshold_out:
                 exclusive_genes[cell_type].append(gene)
-                all_exclusive.append(gene)
 
-    # Get unique exclusive genes
-    unique_genes = list(set(all_exclusive))
+    # Keep only genes that map to exactly one cell type; shared markers
+    # dilute the ME signal and should not be used for cross-type penalties.
+    gene_cell_type_counts = Counter(
+        gene
+        for genes in exclusive_genes.values()
+        for gene in set(genes)
+    )
     filtered_exclusive_genes = {
-        ct: [g for g in genes if g in unique_genes]
+        ct: [g for g in genes if gene_cell_type_counts[g] == 1]
         for ct, genes in exclusive_genes.items()
     }
 
@@ -278,6 +291,8 @@ def load_me_genes_from_scrna(
             flush=True,
         )
 
+    import scanpy as sc
+
     # Load scRNA-seq data
     adata = sc.read_h5ad(scrna_path)
 
@@ -382,7 +397,7 @@ def me_gene_pairs_to_indices(
             index_pairs.append((gene_to_idx[gene1], gene_to_idx[gene2]))
 
     return index_pairs
-_ME_CACHE_VERSION = 2
+_ME_CACHE_VERSION = 3
 _ME_MAX_CELLS_PER_TYPE = 1000
 
 

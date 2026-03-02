@@ -248,7 +248,7 @@ tmp_out="$(mktemp)"
 tmp_row="$(mktemp "${TMPDIR:-/tmp}/segger_validate_row.XXXXXX.tsv")"
 trap 'rm -f "${tmp_out}" "${tmp_row}"' EXIT
 
-METRIC_SCHEMA_VERSION="2026-02-25-v8"
+METRIC_SCHEMA_VERSION="2026-03-02-v10"
 RUN_INPUT_DIR_TOKEN="$(normalize_token "${INPUT_DIR}")"
 RUN_SCRNA_REFERENCE_TOKEN="$(normalize_token "${SCRNA_REFERENCE_PATH}")"
 RUN_ME_GENE_PAIRS_TOKEN="$(normalize_token "${ME_GENE_PAIRS_PATH}")"
@@ -268,7 +268,7 @@ else
 fi
 RUN_REFERENCE_UNIVERSE_TOKEN="$(normalize_token "${REFERENCE_UNIVERSE_SEG_RESOLVED}")"
 
-OUTPUT_HEADER=$'job\tgroup\tgpu\tis_reference\treference_kind\tvalidate_status\tvalidate_error\tgpu_time_s\tcells\tassigned_pct\tassigned_ci95\tmecr\tmecr_ci95\tcontamination_pct\tcontamination_ci95\tresolvi_contamination_pct\tresolvi_contamination_ci95\ttco\ttco_ci95\tdoublet_pct\tdoublet_ci95\tsegmentation_path\tanndata_path\toutput_path\tupdated_at\tmetric_schema_version\trun_input_dir\trun_scrna_reference_path\trun_me_gene_pairs_path\trun_reference_universe_seg'
+OUTPUT_HEADER=$'job\tgroup\tgpu\tis_reference\treference_kind\tvalidate_status\tvalidate_error\tgpu_time_s\tcells\tfragments\tassigned_pct\tassigned_ci95\tpositive_marker_recall_pct\tpositive_marker_recall_ci95\tmecr\tmecr_ci95\tcontamination_pct\tcontamination_ci95\tresolvi_contamination_pct\tresolvi_contamination_ci95\tcenter_border_ncv\tcenter_border_ncv_ci95\tspurious_coexpression\tspurious_coexpression_ci95\treference_morphology_match\treference_morphology_match_ci95\ttco\ttco_ci95\tdoublet_pct\tdoublet_ci95\tsegmentation_path\tanndata_path\toutput_path\tupdated_at\tmetric_schema_version\trun_input_dir\trun_scrna_reference_path\trun_me_gene_pairs_path\trun_reference_universe_seg'
 reuse_existing=0
 if [[ "${RECOMPUTE}" != "1" ]] && [[ -s "${OUT_TSV}" ]]; then
   existing_header="$(head -n1 "${OUT_TSV}" || true)"
@@ -400,28 +400,39 @@ append_row() {
   local validate_error="$7"
   local gpu_time_s="$8"
   local cells="$9"
-  local assigned_pct="${10}"
-  local assigned_ci95="${11}"
-  local mecr="${12}"
-  local mecr_ci95="${13}"
-  local contamination_pct="${14}"
-  local contamination_ci95="${15}"
-  local resolvi_contamination_pct="${16}"
-  local resolvi_contamination_ci95="${17}"
-  local tco="${18}"
-  local tco_ci95="${19}"
-  local doublet_pct="${20}"
-  local doublet_ci95="${21}"
-  local row_seg_path="${22}"
-  local row_anndata_path="${23}"
+  local fragments="${10}"
+  local assigned_pct="${11}"
+  local assigned_ci95="${12}"
+  local positive_marker_recall_pct="${13}"
+  local positive_marker_recall_ci95="${14}"
+  local mecr="${15}"
+  local mecr_ci95="${16}"
+  local contamination_pct="${17}"
+  local contamination_ci95="${18}"
+  local resolvi_contamination_pct="${19}"
+  local resolvi_contamination_ci95="${20}"
+  local center_border_ncv="${21}"
+  local center_border_ncv_ci95="${22}"
+  local spurious_coexpression="${23}"
+  local spurious_coexpression_ci95="${24}"
+  local reference_morphology_match="${25}"
+  local reference_morphology_match_ci95="${26}"
+  local tco="${27}"
+  local tco_ci95="${28}"
+  local doublet_pct="${29}"
+  local doublet_ci95="${30}"
+  local row_seg_path="${31}"
+  local row_anndata_path="${32}"
 
   validate_error="$(sanitize_tsv_field "${validate_error}")"
   reference_kind="$(normalize_token "${reference_kind}")"
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${job}" "${group}" "${gpu}" "${is_reference}" "${reference_kind}" "${validate_status}" "${validate_error}" "${gpu_time_s}" \
-    "${cells}" "${assigned_pct}" "${assigned_ci95}" "${mecr}" "${mecr_ci95}" "${contamination_pct}" "${contamination_ci95}" \
-    "${resolvi_contamination_pct}" "${resolvi_contamination_ci95}" "${tco}" "${tco_ci95}" "${doublet_pct}" "${doublet_ci95}" "${row_seg_path}" "${row_anndata_path}" "${OUT_TSV}" \
+    "${cells}" "${fragments}" "${assigned_pct}" "${assigned_ci95}" "${positive_marker_recall_pct}" "${positive_marker_recall_ci95}" "${mecr}" "${mecr_ci95}" \
+    "${contamination_pct}" "${contamination_ci95}" "${resolvi_contamination_pct}" "${resolvi_contamination_ci95}" "${center_border_ncv}" "${center_border_ncv_ci95}" \
+    "${spurious_coexpression}" "${spurious_coexpression_ci95}" "${reference_morphology_match}" "${reference_morphology_match_ci95}" "${tco}" "${tco_ci95}" \
+    "${doublet_pct}" "${doublet_ci95}" "${row_seg_path}" "${row_anndata_path}" "${OUT_TSV}" \
     "$(timestamp)" "${METRIC_SCHEMA_VERSION}" "${RUN_INPUT_DIR_TOKEN}" "${RUN_SCRNA_REFERENCE_TOKEN}" "${RUN_ME_GENE_PAIRS_TOKEN}" "${RUN_REFERENCE_UNIVERSE_TOKEN}" \
     >> "${tmp_out}"
 }
@@ -476,15 +487,20 @@ should_reuse_row() {
   elif [[ -n "${INPUT_DIR}" ]]; then
     existing_tco="$(get_existing_field_by_job "${job}" "tco")"
     existing_contam="$(get_existing_field_by_job "${job}" "contamination_pct")"
+    existing_border_ncv="$(get_existing_field_by_job "${job}" "center_border_ncv")"
+    existing_spurious="$(get_existing_field_by_job "${job}" "spurious_coexpression")"
+    existing_morph="$(get_existing_field_by_job "${job}" "reference_morphology_match")"
     existing_doublet="$(get_existing_field_by_job "${job}" "doublet_pct")"
-    if [[ -z "${existing_tco:-}" ]] || [[ -z "${existing_contam:-}" ]] || [[ -z "${existing_doublet:-}" ]]; then
+    if [[ -z "${existing_tco:-}" ]] || [[ -z "${existing_contam:-}" ]] || [[ -z "${existing_border_ncv:-}" ]] || \
+       [[ -z "${existing_spurious:-}" ]] || [[ -z "${existing_morph:-}" ]] || [[ -z "${existing_doublet:-}" ]]; then
       should_reuse=0
       reason="missing_input_dependent_metrics"
     elif [[ -n "${SCRNA_REFERENCE_PATH}" ]]; then
       existing_resolvi="$(get_existing_field_by_job "${job}" "resolvi_contamination_pct")"
-      if [[ -z "${existing_resolvi:-}" ]]; then
+      existing_marker_recall="$(get_existing_field_by_job "${job}" "positive_marker_recall_pct")"
+      if [[ -z "${existing_resolvi:-}" ]] || [[ -z "${existing_marker_recall:-}" ]]; then
         should_reuse=0
-        reason="missing_resolvi_metric"
+        reason="missing_scrna_dependent_metrics"
       fi
     fi
   fi
@@ -501,14 +517,23 @@ run_validate_for_row() {
   validate_status="ok"
   validate_error=""
   cells="0"
+  fragments="0"
   assigned_pct="nan"
   assigned_ci95="nan"
+  positive_marker_recall_pct="nan"
+  positive_marker_recall_ci95="nan"
   mecr="nan"
   mecr_ci95="nan"
   contamination_pct="nan"
   contamination_ci95="nan"
   resolvi_contamination_pct="nan"
   resolvi_contamination_ci95="nan"
+  center_border_ncv="nan"
+  center_border_ncv_ci95="nan"
+  spurious_coexpression="nan"
+  spurious_coexpression_ci95="nan"
+  reference_morphology_match="nan"
+  reference_morphology_match_ci95="nan"
   tco="nan"
   tco_ci95="nan"
   doublet_pct="nan"
@@ -562,18 +587,36 @@ run_validate_for_row() {
       gpu_time_s="${parsed_elapsed}"
     fi
 
-    parsed_val="$(get_field "cells_total")"
+    parsed_val="$(get_field "cells_non_fragment_total")"
     if [[ -n "${parsed_val}" ]] && [[ "$(printf '%s' "${parsed_val}" | tr '[:upper:]' '[:lower:]')" != "nan" ]]; then
       cells="${parsed_val}"
     else
       parsed_val="$(get_field "cells_assigned")"
-      [[ -n "${parsed_val}" ]] && cells="${parsed_val}"
+      if [[ -n "${parsed_val}" ]] && [[ "$(printf '%s' "${parsed_val}" | tr '[:upper:]' '[:lower:]')" != "nan" ]]; then
+        cells="${parsed_val}"
+      else
+        parsed_val="$(get_field "cells_total")"
+        [[ -n "${parsed_val}" ]] && cells="${parsed_val}"
+      fi
+    fi
+
+    parsed_val="$(get_field "fragments_total")"
+    if [[ -n "${parsed_val}" ]] && [[ "$(printf '%s' "${parsed_val}" | tr '[:upper:]' '[:lower:]')" != "nan" ]]; then
+      fragments="${parsed_val}"
+    else
+      parsed_val="$(get_field "fragments_assigned")"
+      [[ -n "${parsed_val}" ]] && fragments="${parsed_val}"
     fi
 
     parsed_val="$(get_field "transcripts_assigned_pct")"
     [[ -n "${parsed_val}" ]] && assigned_pct="${parsed_val}"
     parsed_val="$(get_field "transcripts_assigned_pct_ci95")"
     [[ -n "${parsed_val}" ]] && assigned_ci95="${parsed_val}"
+
+    parsed_val="$(get_field "positive_marker_recall_fast")"
+    [[ -n "${parsed_val}" ]] && positive_marker_recall_pct="${parsed_val}"
+    parsed_val="$(get_field "positive_marker_recall_ci95_fast")"
+    [[ -n "${parsed_val}" ]] && positive_marker_recall_ci95="${parsed_val}"
 
     parsed_val="$(get_field "mecr_fast")"
     [[ -n "${parsed_val}" ]] && mecr="${parsed_val}"
@@ -590,16 +633,31 @@ run_validate_for_row() {
     parsed_val="$(get_field "resolvi_contamination_ci95_fast")"
     [[ -n "${parsed_val}" ]] && resolvi_contamination_ci95="${parsed_val}"
 
+    parsed_val="$(get_field "center_border_ncv_score_fast")"
+    [[ -n "${parsed_val}" ]] && center_border_ncv="${parsed_val}"
+    parsed_val="$(get_field "center_border_ncv_ci95_fast")"
+    [[ -n "${parsed_val}" ]] && center_border_ncv_ci95="${parsed_val}"
+
+    parsed_val="$(get_field "spurious_coexpression_fast")"
+    [[ -n "${parsed_val}" ]] && spurious_coexpression="${parsed_val}"
+    parsed_val="$(get_field "spurious_coexpression_ci95_fast")"
+    [[ -n "${parsed_val}" ]] && spurious_coexpression_ci95="${parsed_val}"
+
+    parsed_val="$(get_field "reference_morphology_match_fast")"
+    [[ -n "${parsed_val}" ]] && reference_morphology_match="${parsed_val}"
+    parsed_val="$(get_field "reference_morphology_match_ci95_fast")"
+    [[ -n "${parsed_val}" ]] && reference_morphology_match_ci95="${parsed_val}"
+
     parsed_val="$(get_field "transcript_centroid_offset_fast")"
     [[ -n "${parsed_val}" ]] && tco="${parsed_val}"
     parsed_val="$(get_field "transcript_centroid_offset_ci95_fast")"
     [[ -n "${parsed_val}" ]] && tco_ci95="${parsed_val}"
 
-    parsed_val="$(get_field "signal_doublet_like_fraction_fast")"
+    parsed_val="$(get_field "vsi_doublet_fraction_fast")"
     if [[ -n "${parsed_val}" ]]; then
       doublet_pct="$(scale_frac_to_pct "${parsed_val}")"
     fi
-    parsed_val="$(get_field "signal_doublet_like_fraction_ci95_fast")"
+    parsed_val="$(get_field "vsi_doublet_fraction_ci95_fast")"
     if [[ -n "${parsed_val}" ]]; then
       doublet_ci95="$(scale_frac_to_pct "${parsed_val}")"
     fi
@@ -666,9 +724,10 @@ while IFS=$'\t' read -r \
 
   append_row \
     "${job}" "${group}" "${gpu}" "0" "-" \
-    "${validate_status}" "${validate_error}" "${gpu_time_s}" "${cells}" \
-    "${assigned_pct}" "${assigned_ci95}" "${mecr}" "${mecr_ci95}" \
-    "${contamination_pct}" "${contamination_ci95}" "${resolvi_contamination_pct}" "${resolvi_contamination_ci95}" "${tco}" "${tco_ci95}" \
+    "${validate_status}" "${validate_error}" "${gpu_time_s}" "${cells}" "${fragments}" \
+    "${assigned_pct}" "${assigned_ci95}" "${positive_marker_recall_pct}" "${positive_marker_recall_ci95}" "${mecr}" "${mecr_ci95}" \
+    "${contamination_pct}" "${contamination_ci95}" "${resolvi_contamination_pct}" "${resolvi_contamination_ci95}" "${center_border_ncv}" "${center_border_ncv_ci95}" \
+    "${spurious_coexpression}" "${spurious_coexpression_ci95}" "${reference_morphology_match}" "${reference_morphology_match_ci95}" "${tco}" "${tco_ci95}" \
     "${doublet_pct}" "${doublet_ci95}" "${row_seg_path}" "${row_anndata_path}"
 done < "${PLAN_FILE}"
 
@@ -697,14 +756,23 @@ if [[ "${INCLUDE_DEFAULT_10X}" == "true" ]]; then
     validate_status="ok"
     validate_error=""
     cells="0"
+    fragments="0"
     assigned_pct="nan"
     assigned_ci95="nan"
+    positive_marker_recall_pct="nan"
+    positive_marker_recall_ci95="nan"
     mecr="nan"
     mecr_ci95="nan"
     contamination_pct="nan"
     contamination_ci95="nan"
     resolvi_contamination_pct="nan"
     resolvi_contamination_ci95="nan"
+    center_border_ncv="nan"
+    center_border_ncv_ci95="nan"
+    spurious_coexpression="nan"
+    spurious_coexpression_ci95="nan"
+    reference_morphology_match="nan"
+    reference_morphology_match_ci95="nan"
     tco="nan"
     tco_ci95="nan"
     doublet_pct="nan"
@@ -745,9 +813,10 @@ if [[ "${INCLUDE_DEFAULT_10X}" == "true" ]]; then
 
     append_row \
       "${job}" "${group}" "${gpu}" "1" "${reference_kind}" \
-      "${validate_status}" "${validate_error}" "${gpu_time_s}" "${cells}" \
-      "${assigned_pct}" "${assigned_ci95}" "${mecr}" "${mecr_ci95}" \
-      "${contamination_pct}" "${contamination_ci95}" "${resolvi_contamination_pct}" "${resolvi_contamination_ci95}" "${tco}" "${tco_ci95}" \
+      "${validate_status}" "${validate_error}" "${gpu_time_s}" "${cells}" "${fragments}" \
+      "${assigned_pct}" "${assigned_ci95}" "${positive_marker_recall_pct}" "${positive_marker_recall_ci95}" "${mecr}" "${mecr_ci95}" \
+      "${contamination_pct}" "${contamination_ci95}" "${resolvi_contamination_pct}" "${resolvi_contamination_ci95}" "${center_border_ncv}" "${center_border_ncv_ci95}" \
+      "${spurious_coexpression}" "${spurious_coexpression_ci95}" "${reference_morphology_match}" "${reference_morphology_match_ci95}" "${tco}" "${tco_ci95}" \
       "${doublet_pct}" "${doublet_ci95}" "${row_seg_path}" "${row_anndata_path}"
   done
 fi

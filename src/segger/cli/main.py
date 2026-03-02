@@ -1013,6 +1013,11 @@ def validate(
         validator=validators.Number(gt=0, lte=1),
         group=group_validation,
     )] = 0.6,
+    signal_hotspot_grid_size: Annotated[float, Parameter(
+        help="Pixel size for hotspot-based vertical integrity proxy (larger is faster and less sparse).",
+        validator=validators.Number(gt=0),
+        group=group_validation,
+    )] = 3.0,
     random_seed: Annotated[int, Parameter(
         help="Random seed for pair/cell subsampling in fast metrics.",
         group=group_validation,
@@ -1021,13 +1026,16 @@ def validate(
     """Compute lightweight validation metrics for Segger outputs.
 
     Metrics:
-    - cells_assigned / cells_total (higher coverage is better)
     - transcripts_assigned_pct (higher is better)
+    - positive_marker_recall_fast (higher is better)
     - mecr_fast (lower is better)
-    - border_excess_pct_fast + border_contaminated_cells_pct_fast (lower is better)
     - resolvi_contamination_pct_fast (lower is better)
+    - center_border_ncv_score_fast (higher is better)
+    - reference_morphology_match_fast (higher is better)
+    - spurious_coexpression_fast (lower is better)
     - transcript_centroid_offset_fast (higher is better)
-    - signal_doublet_like_fraction_fast (lower is better)
+    - signal_hotspot_doublet_fraction_fast (lower is better; canonical z-coherence metric)
+    - vsi_doublet_fraction_fast (lower is better; alias of signal_hotspot_doublet_fraction_fast)
     """
     import time
     import polars as pl
@@ -1036,9 +1044,14 @@ def validate(
         count_cells_from_anndata,
         compute_assignment_metrics,
         compute_border_contamination_fast,
+        compute_center_border_ncv_fast,
         compute_mecr_fast,
+        compute_positive_marker_recall_fast,
+        compute_reference_morphology_match_fast,
         compute_resolvi_contamination_fast,
         compute_signal_doublet_fast,
+        compute_signal_hotspot_doublet_fast,
+        compute_spurious_coexpression_fast,
         compute_transcript_centroid_offset_fast,
         load_me_gene_pairs,
         load_segmentation,
@@ -1073,24 +1086,58 @@ def validate(
         "segmentation_path": str(segmentation_path),
         "anndata_path": str(anndata_path) if anndata_path is not None else None,
         "cells_total": None,
+        "cells_non_fragment_total": 0,
+        "fragments_total": 0,
+        "positive_marker_recall_ci95_fast": float("nan"),
         "transcripts_assigned_pct_ci95": float("nan"),
         "mecr_ci95_fast": float("nan"),
         "border_contaminated_cells_pct_ci95_fast": float("nan"),
+        "center_border_ncv_ci95_fast": float("nan"),
+        "reference_morphology_match_ci95_fast": float("nan"),
         "resolvi_contamination_ci95_fast": float("nan"),
+        "spurious_coexpression_ci95_fast": float("nan"),
         "transcript_centroid_offset_ci95_fast": float("nan"),
         "signal_doublet_like_fraction_ci95_fast": float("nan"),
+        "signal_hotspot_doublet_fraction_ci95_fast": float("nan"),
+        "vsi_doublet_fraction_fast": float("nan"),
+        "vsi_doublet_fraction_ci95_fast": float("nan"),
+        "vsi_hotspot_cutoff_fast": float("nan"),
+        "vsi_hotspot_pixels_used_fast": 0,
+        "vsi_hotspot_candidate_cells_fast": 0,
+        "vsi_hotspot_metric_cells_used_fast": 0,
+        "vsi_hotspot_cells_scored_fast": 0,
+        "signal_hotspot_cutoff_fast": float("nan"),
+        "signal_hotspot_pixels_used_fast": 0,
+        "signal_hotspot_candidate_cells_fast": 0,
+        "signal_hotspot_metric_cells_used_fast": 0,
+        "signal_hotspot_cells_scored_fast": 0,
     }
 
     try:
         seg_df = load_segmentation(segmentation_path)
         row.update(compute_assignment_metrics(seg_df))
+        row["cells_non_fragment_total"] = int(row.get("cells_assigned", 0))
+        row["fragments_total"] = int(row.get("fragments_assigned", 0))
         cells_total = count_cells_from_anndata(anndata_path)
         if cells_total is None:
-            cells_total = int(row.get("cells_assigned", 0))
+            cells_total = int(row.get("cells_assigned", 0)) + int(
+                row.get("fragments_assigned", 0)
+            )
         row["cells_total"] = int(cells_total)
 
         if source_tx is not None:
             assigned_tx = merge_assigned_transcripts(seg_df, source_tx)
+            row.update(
+                compute_positive_marker_recall_fast(
+                    assigned_tx,
+                    scrna_reference_path=Path(scrna_reference_path) if scrna_reference_path is not None else None,
+                    scrna_celltype_column=scrna_celltype_column,
+                    feature_column=tx_fields.feature,
+                    min_transcripts_per_cell=border_min_transcripts_per_cell,
+                    max_cells=border_max_cells,
+                    seed=random_seed,
+                )
+            )
             row.update(
                 compute_border_contamination_fast(
                     assigned_tx,
@@ -1098,6 +1145,16 @@ def validate(
                     min_transcripts_per_cell=border_min_transcripts_per_cell,
                     max_cells=border_max_cells,
                     contaminated_enrichment_threshold=border_contaminated_enrichment_threshold,
+                    seed=random_seed,
+                )
+            )
+            row.update(
+                compute_center_border_ncv_fast(
+                    assigned_tx,
+                    feature_column=tx_fields.feature,
+                    erosion_fraction=border_erosion_fraction,
+                    min_transcripts_per_cell=border_min_transcripts_per_cell,
+                    max_cells=border_max_cells,
                     seed=random_seed,
                 )
             )
@@ -1119,6 +1176,45 @@ def validate(
                     doublet_threshold=signal_doublet_threshold,
                 )
             )
+            hotspot_metrics = compute_signal_hotspot_doublet_fast(
+                source_tx,
+                assigned_tx,
+                feature_column=tx_fields.feature,
+                z_column=tx_fields.z,
+                grid_size=signal_hotspot_grid_size,
+                min_transcripts_per_cell=signal_min_transcripts_per_cell,
+                max_cells=signal_max_cells,
+                seed=random_seed,
+                doublet_threshold=signal_doublet_threshold,
+            )
+            row.update(hotspot_metrics)
+            row.update(
+                {
+                    "vsi_doublet_fraction_fast": hotspot_metrics["signal_hotspot_doublet_fraction_fast"],
+                    "vsi_doublet_fraction_ci95_fast": hotspot_metrics["signal_hotspot_doublet_fraction_ci95_fast"],
+                    "vsi_hotspot_cutoff_fast": hotspot_metrics["signal_hotspot_cutoff_fast"],
+                    "vsi_hotspot_pixels_used_fast": hotspot_metrics["signal_hotspot_pixels_used_fast"],
+                    "vsi_hotspot_candidate_cells_fast": hotspot_metrics["signal_hotspot_candidate_cells_fast"],
+                    "vsi_hotspot_metric_cells_used_fast": hotspot_metrics["signal_hotspot_metric_cells_used_fast"],
+                    "vsi_hotspot_cells_scored_fast": hotspot_metrics["signal_hotspot_cells_scored_fast"],
+                }
+            )
+            row.update(
+                compute_spurious_coexpression_fast(
+                    source_tx,
+                    assigned_tx,
+                    feature_column=tx_fields.feature,
+                    min_transcripts_per_cell=border_min_transcripts_per_cell,
+                    max_cells=border_max_cells,
+                    seed=random_seed,
+                )
+            )
+            row.update(
+                compute_reference_morphology_match_fast(
+                    source_tx,
+                    assigned_tx,
+                )
+            )
             row.update(
                 compute_resolvi_contamination_fast(
                     assigned_tx,
@@ -1133,12 +1229,21 @@ def validate(
         else:
             row.update(
                 {
+                    "positive_marker_recall_fast": float("nan"),
+                    "positive_marker_recall_ci95_fast": float("nan"),
+                    "positive_marker_types_used_fast": 0,
+                    "positive_marker_genes_used_fast": 0,
+                    "positive_marker_cells_used_fast": 0,
                     "border_contamination_fast": float("nan"),
                     "border_enrichment_fast": float("nan"),
                     "border_excess_pct_fast": float("nan"),
                     "border_contaminated_cells_pct_fast": float("nan"),
                     "border_contaminated_cells_pct_ci95_fast": float("nan"),
                     "border_metric_cells_used": 0,
+                    "center_border_ncv_score_fast": float("nan"),
+                    "center_border_ncv_ci95_fast": float("nan"),
+                    "center_border_ncv_ratio_fast": float("nan"),
+                    "center_border_ncv_cells_used_fast": 0,
                     "resolvi_contamination_pct_fast": float("nan"),
                     "resolvi_contamination_ci95_fast": float("nan"),
                     "resolvi_contaminated_cells_pct_fast": float("nan"),
@@ -1146,12 +1251,34 @@ def validate(
                     "resolvi_metric_cells_used": 0,
                     "resolvi_shared_genes_used": 0,
                     "resolvi_cell_types_used": 0,
+                    "spurious_coexpression_fast": float("nan"),
+                    "spurious_coexpression_ci95_fast": float("nan"),
+                    "spurious_pairs_used_fast": 0,
+                    "spurious_pairs_discovered_fast": 0,
+                    "spurious_source_transcripts_used_fast": 0,
+                    "reference_morphology_match_fast": float("nan"),
+                    "reference_morphology_match_ci95_fast": float("nan"),
+                    "reference_morphology_cells_used_fast": 0,
                     "transcript_centroid_offset_fast": float("nan"),
                     "transcript_centroid_offset_ci95_fast": float("nan"),
                     "tco_metric_cells_used": 0,
                     "signal_doublet_like_fraction_fast": float("nan"),
                     "signal_doublet_like_fraction_ci95_fast": float("nan"),
                     "signal_metric_cells_used": 0,
+                    "vsi_doublet_fraction_fast": float("nan"),
+                    "vsi_doublet_fraction_ci95_fast": float("nan"),
+                    "vsi_hotspot_cutoff_fast": float("nan"),
+                    "vsi_hotspot_pixels_used_fast": 0,
+                    "vsi_hotspot_candidate_cells_fast": 0,
+                    "vsi_hotspot_metric_cells_used_fast": 0,
+                    "vsi_hotspot_cells_scored_fast": 0,
+                    "signal_hotspot_doublet_fraction_fast": float("nan"),
+                    "signal_hotspot_doublet_fraction_ci95_fast": float("nan"),
+                    "signal_hotspot_cutoff_fast": float("nan"),
+                    "signal_hotspot_pixels_used_fast": 0,
+                    "signal_hotspot_candidate_cells_fast": 0,
+                    "signal_hotspot_metric_cells_used_fast": 0,
+                    "signal_hotspot_cells_scored_fast": 0,
                 }
             )
 
