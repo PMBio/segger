@@ -3,7 +3,7 @@
 This writer creates SpatialData-compatible Zarr stores containing:
 - points["transcripts"]: Transcripts with segger_cell_id column
 - shapes["cells"]: Cell boundaries (optional, can be input or generated)
-- tables["cell_table"]: AnnData table with cell x gene counts (optional)
+- tables["cells"]: AnnData table with cell x gene counts (optional)
 
 NO images are included (per requirements).
 
@@ -36,6 +36,12 @@ from segger.utils.optional_deps import (
 )
 from segger.export.output_formats import OutputFormat, register_writer
 from segger.export.anndata_writer import build_anndata_table
+from segger.export.merged_writer import merge_predictions_with_transcripts
+from segger.utils.fragment_outputs import (
+    OBJECT_TYPE_CELL,
+    OBJECT_TYPE_FRAGMENT,
+    split_transcripts_by_object_type,
+)
 
 if TYPE_CHECKING:
     import geopandas as gpd
@@ -66,10 +72,14 @@ class SpatialDataWriter:
         Key for transcripts in sdata.points. Default "transcripts".
     shapes_key
         Key for cell shapes in sdata.shapes. Default "cells".
+    fragment_shapes_key
+        Key for fragment shapes in sdata.shapes. Default "fragments".
     include_table
         Whether to include AnnData table in sdata.tables. Default True.
     table_key
-        Key for AnnData table in sdata.tables. Default "cell_table".
+        Key for AnnData table in sdata.tables. Default "cells".
+    fragment_table_key
+        Key for fragment AnnData table in sdata.tables. Default "fragments".
     table_region_key
         Column in shapes that identifies cells. Default "cell_id".
     """
@@ -81,8 +91,10 @@ class SpatialDataWriter:
         boundary_n_jobs: int = 1,
         points_key: str = "transcripts",
         shapes_key: str = "cells",
+        fragment_shapes_key: str = "fragments",
         include_table: bool = True,
-        table_key: str = "cell_table",
+        table_key: str = "cells",
+        fragment_table_key: str = "fragments",
         table_region_key: str = "cell_id",
     ):
         require_spatialdata()
@@ -92,9 +104,15 @@ class SpatialDataWriter:
         self.boundary_n_jobs = boundary_n_jobs
         self.points_key = points_key
         self.shapes_key = shapes_key
+        self.fragment_shapes_key = fragment_shapes_key
         self.include_table = include_table
         self.table_key = table_key
+        self.fragment_table_key = fragment_table_key
         self.table_region_key = table_region_key
+        if self.shapes_key == self.fragment_shapes_key:
+            raise ValueError("shapes_key and fragment_shapes_key must be different.")
+        if self.table_key == self.fragment_table_key:
+            raise ValueError("table_key and fragment_table_key must be different.")
 
     def write(
         self,
@@ -209,30 +227,14 @@ class SpatialDataWriter:
         similarity_column: str,
     ) -> pl.DataFrame:
         """Merge predictions with transcripts."""
-        # Prepare predictions
-        pred_cols = [row_index_column, cell_id_column]
-        if similarity_column in predictions.columns:
-            pred_cols.append(similarity_column)
-
-        pred_subset = predictions.select(pred_cols)
-
-        # Add row_index if missing
-        if row_index_column not in transcripts.columns:
-            transcripts = transcripts.with_row_index(name=row_index_column)
-
-        # Join
-        merged = transcripts.join(pred_subset, on=row_index_column, how="left")
-
-        # Fill unassigned with -1
-        merged = merged.with_columns(
-            pl.col(cell_id_column).fill_null(-1)
+        return merge_predictions_with_transcripts(
+            predictions=predictions,
+            transcripts=transcripts,
+            row_index_column=row_index_column,
+            cell_id_column=cell_id_column,
+            similarity_column=similarity_column,
+            unassigned_marker=-1,
         )
-        if similarity_column in merged.columns:
-            merged = merged.with_columns(
-                pl.col(similarity_column).fill_null(0.0)
-            )
-
-        return merged
 
     def _create_spatialdata(
         self,
@@ -251,9 +253,18 @@ class SpatialDataWriter:
 
         identity = self._identity_transform()
         transformations = {"global": identity} if identity is not None else None
+        split_frames = split_transcripts_by_object_type(
+            transcripts,
+            cell_id_column=cell_id_column,
+            unassigned_value=-1,
+        )
+        cell_tx = split_frames[OBJECT_TYPE_CELL]
+        fragment_tx = split_frames[OBJECT_TYPE_FRAGMENT]
 
         # Convert transcripts to pandas for SpatialData
         tx_pd = transcripts.to_pandas()
+        cell_tx_pd = cell_tx.to_pandas()
+        fragment_tx_pd = fragment_tx.to_pandas()
 
         # SOPA expects "cell_id" assignment in points.
         if cell_id_column in tx_pd.columns and "cell_id" not in tx_pd.columns:
@@ -293,52 +304,55 @@ class SpatialDataWriter:
 
         # Shapes element (if boundaries provided or generated)
         if self.include_boundaries and self.boundary_method != "skip":
-            shapes = self._get_boundaries(
-                transcripts=tx_pd,
-                boundaries=boundaries,
-                x_column=x_column,
-                y_column=y_column,
-                cell_id_column=cell_id_column,
+            shape_specs = (
+                (self.shapes_key, cell_tx_pd),
+                (self.fragment_shapes_key, fragment_tx_pd),
             )
-            if shapes is not None and len(shapes) > 0:
-                shapes_parse_kwargs = {}
-                if transformations is not None:
-                    shapes_parse_kwargs["transformations"] = transformations
-                shapes_parsed = ShapesModel.parse(shapes, **shapes_parse_kwargs)
-                shapes_elements[self.shapes_key] = shapes_parsed
+            for shape_key, shape_tx_pd in shape_specs:
+                shapes = self._get_boundaries(
+                    transcripts=shape_tx_pd,
+                    boundaries=boundaries,
+                    x_column=x_column,
+                    y_column=y_column,
+                    cell_id_column=cell_id_column,
+                )
+                if shapes is not None and len(shapes) > 0:
+                    shapes_parse_kwargs = {}
+                    if transformations is not None:
+                        shapes_parse_kwargs["transformations"] = transformations
+                    shapes_parsed = ShapesModel.parse(shapes, **shapes_parse_kwargs)
+                    shapes_elements[shape_key] = shapes_parsed
 
         tables_elements = {}
 
         # Optional AnnData table
         if self.include_table:
-            region = self.shapes_key if self.shapes_key in shapes_elements else None
-            instance_key = self.table_region_key if region is not None else None
-            table = build_anndata_table(
-                transcripts=transcripts,
+            tables_elements[self.table_key] = self._build_table_element(
+                TableModel=TableModel,
+                transcripts=cell_tx,
+                var_transcripts=transcripts,
+                region=self.shapes_key if self.shapes_key in shapes_elements else None,
                 cell_id_column=cell_id_column,
                 feature_column=feature_column,
                 x_column=x_column,
                 y_column=y_column,
                 z_column=z_column,
-                unassigned_value=-1,
-                region=None,
-                region_key=None,
-                obs_index_as_str=True,
             )
-            if region is not None:
-                table.obs["region"] = region
-                if instance_key and instance_key not in table.obs.columns:
-                    table.obs[instance_key] = table.obs.index.astype(str)
-                try:
-                    table = TableModel.parse(
-                        table,
-                        region=region,
-                        region_key="region",
-                        instance_key=instance_key or "instance_id",
-                    )
-                except Exception:
-                    pass
-            tables_elements[self.table_key] = table
+            tables_elements[self.fragment_table_key] = self._build_table_element(
+                TableModel=TableModel,
+                transcripts=fragment_tx,
+                var_transcripts=transcripts,
+                region=(
+                    self.fragment_shapes_key
+                    if self.fragment_shapes_key in shapes_elements
+                    else None
+                ),
+                cell_id_column=cell_id_column,
+                feature_column=feature_column,
+                x_column=x_column,
+                y_column=y_column,
+                z_column=z_column,
+            )
 
         # Create SpatialData (prefer modern constructor methods, keep fallback)
         sdata = self._build_spatialdata(
@@ -387,6 +401,49 @@ class SpatialDataWriter:
                 sdata.tables[key] = value
             return sdata
 
+    def _build_table_element(
+        self,
+        TableModel,
+        transcripts: pl.DataFrame,
+        var_transcripts: pl.DataFrame,
+        region: Optional[str],
+        cell_id_column: str,
+        feature_column: str,
+        x_column: str,
+        y_column: str,
+        z_column: Optional[str],
+    ):
+        """Build a SpatialData table and attach region metadata when available."""
+        table = build_anndata_table(
+            transcripts=transcripts,
+            var_transcripts=var_transcripts,
+            cell_id_column=cell_id_column,
+            feature_column=feature_column,
+            x_column=x_column,
+            y_column=y_column,
+            z_column=z_column,
+            unassigned_value=-1,
+            region=None,
+            region_key=None,
+            obs_index_as_str=True,
+        )
+        if region is None:
+            return table
+
+        instance_key = self.table_region_key
+        table.obs["region"] = region
+        if instance_key and instance_key not in table.obs.columns:
+            table.obs[instance_key] = table.obs.index.astype(str)
+        try:
+            return TableModel.parse(
+                table,
+                region=region,
+                region_key="region",
+                instance_key=instance_key or "instance_id",
+            )
+        except Exception:
+            return table
+
     def _write_spatialdata_zarr(self, sdata, output_path: Path, overwrite: bool) -> None:
         """Write SpatialData object with compatibility fallback."""
         try:
@@ -427,7 +484,11 @@ class SpatialDataWriter:
 
         # Use input boundaries if available
         if boundaries is not None:
-            return _ensure_cell_id(boundaries)
+            filtered = _ensure_cell_id(boundaries)
+            if len(transcripts) == 0:
+                return filtered.iloc[0:0].copy()
+            selected_ids = transcripts[cell_id_column].dropna().unique()
+            return filtered[filtered["cell_id"].isin(selected_ids)].copy()
 
         # Generate boundaries based on method
         if self.boundary_method == "input":

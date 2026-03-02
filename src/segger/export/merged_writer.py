@@ -26,6 +26,12 @@ from typing import TYPE_CHECKING, Literal, Optional, Union
 import polars as pl
 
 from segger.export.output_formats import OutputFormat, register_writer
+from segger.utils.fragment_outputs import (
+    FRAGMENT_FLAG_COLUMN,
+    OBJECT_GROUP_COLUMN,
+    OBJECT_TYPE_COLUMN,
+    with_fragment_annotations,
+)
 
 if TYPE_CHECKING:
     pass
@@ -191,33 +197,14 @@ class MergedTranscriptsWriter:
                 )
             original = self._load_transcripts(path)
 
-        # Prepare predictions for join
-        pred_cols = [row_index_column, cell_id_column]
-        if self.include_similarity and similarity_column in predictions.columns:
-            pred_cols.append(similarity_column)
-
-        pred_subset = predictions.select(pred_cols)
-
-        # Handle missing row_index in original (add if needed)
-        if row_index_column not in original.columns:
-            original = original.with_row_index(name=row_index_column)
-
-        # Join predictions with original transcripts
-        merged = original.join(
-            pred_subset,
-            on=row_index_column,
-            how="left",
+        merged = merge_predictions_with_transcripts(
+            predictions=predictions,
+            transcripts=original,
+            row_index_column=row_index_column,
+            cell_id_column=cell_id_column,
+            similarity_column=similarity_column if self.include_similarity else "",
+            unassigned_marker=self.unassigned_marker,
         )
-
-        # Fill unassigned values
-        if self.unassigned_marker is not None:
-            merged = merged.with_columns(
-                pl.col(cell_id_column).fill_null(self.unassigned_marker)
-            )
-            if self.include_similarity and similarity_column in merged.columns:
-                merged = merged.with_columns(
-                    pl.col(similarity_column).fill_null(0.0)
-                )
 
         # Write output
         output_path = output_dir / output_name
@@ -292,8 +279,11 @@ def merge_predictions_with_transcripts(
     """
     # Prepare predictions
     pred_cols = [row_index_column, cell_id_column]
-    if similarity_column in predictions.columns:
+    if similarity_column and similarity_column in predictions.columns:
         pred_cols.append(similarity_column)
+    for column in (FRAGMENT_FLAG_COLUMN, OBJECT_TYPE_COLUMN, OBJECT_GROUP_COLUMN):
+        if column in predictions.columns:
+            pred_cols.append(column)
 
     pred_subset = predictions.select(pred_cols)
 
@@ -309,9 +299,13 @@ def merge_predictions_with_transcripts(
         merged = merged.with_columns(
             pl.col(cell_id_column).fill_null(unassigned_marker)
         )
-        if similarity_column in merged.columns:
+        if similarity_column and similarity_column in merged.columns:
             merged = merged.with_columns(
                 pl.col(similarity_column).fill_null(0.0)
             )
 
-    return merged
+    return with_fragment_annotations(
+        merged,
+        cell_id_column=cell_id_column,
+        unassigned_value=unassigned_marker,
+    )

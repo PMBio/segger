@@ -23,6 +23,11 @@ from tqdm import tqdm
 from zarr.storage import ZipStore
 
 from .boundary import extract_largest_polygon, generate_boundary
+from segger.utils.fragment_outputs import (
+    FRAGMENT_FLAG_COLUMN,
+    OBJECT_TYPE_COLUMN,
+    annotate_pandas_object_types,
+)
 
 
 def _normalize_polygon_vertices(
@@ -228,6 +233,27 @@ def generate_experiment_file(
 
     with open(output_path, "w") as f:
         json.dump(experiment, f, indent=2)
+
+
+def _build_clustering_dataframe(
+    cell_ids: list[Any],
+    cell_id_column: str,
+    analysis_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Build analysis groupings and always include a cells/fragments grouping."""
+    zarr_df = pd.DataFrame(cell_ids, columns=[cell_id_column])
+    if analysis_df is None:
+        clustering_df = zarr_df.copy()
+        clustering_df["default"] = "segger"
+    else:
+        clustering_df = pd.merge(zarr_df, analysis_df, how="left", on=cell_id_column)
+
+    clustering_df = annotate_pandas_object_types(
+        clustering_df,
+        cell_id_column=cell_id_column,
+        unassigned_value=None,
+    )
+    return clustering_df.drop(columns=[FRAGMENT_FLAG_COLUMN, OBJECT_TYPE_COLUMN])
 
 
 def seg2explorer(
@@ -466,17 +492,12 @@ def seg2explorer(
     source_zarr_store.close()
 
     # Create analysis data
-    if analysis_df is None:
-        analysis_df = pd.DataFrame(
-            [cell_id2old_id[i] for i in cell_id], columns=[cell_id_column]
-        )
-        analysis_df["default"] = "segger"
-
-    zarr_df = pd.DataFrame(
-        [cell_id2old_id[i] for i in cell_id], columns=[cell_id_column]
+    clustering_df = _build_clustering_dataframe(
+        cell_ids=[cell_id2old_id[i] for i in cell_id],
+        cell_id_column=cell_id_column,
+        analysis_df=analysis_df,
     )
-    clustering_df = pd.merge(zarr_df, analysis_df, how="left", on=cell_id_column)
-    clusters_names = [col for col in analysis_df.columns if col != cell_id_column]
+    clusters_names = [col for col in clustering_df.columns if col != cell_id_column]
 
     clusters_dict = {
         cluster: {
@@ -681,6 +702,13 @@ def seg2explorer_pqdm(
     storage = Path(output_dir)
     storage.mkdir(parents=True, exist_ok=True)
 
+    # Drop unassigned cells if numeric
+    if cell_id_column in seg_df.columns:
+        if pd.api.types.is_numeric_dtype(seg_df[cell_id_column]):
+            seg_df = seg_df[seg_df[cell_id_column] >= 0]
+        else:
+            seg_df = seg_df[seg_df[cell_id_column].notna()]
+
     grouped_by = seg_df.groupby(cell_id_column)
 
     def _work_iter():
@@ -812,17 +840,12 @@ def seg2explorer_pqdm(
     source_zarr_store.close()
 
     # Create analysis data
-    if analysis_df is None:
-        analysis_df = pd.DataFrame(
-            [cell_id2old_id[i] for i in cell_id], columns=[cell_id_column]
-        )
-        analysis_df["default"] = "segger"
-
-    zarr_df = pd.DataFrame(
-        [cell_id2old_id[i] for i in cell_id], columns=[cell_id_column]
+    clustering_df = _build_clustering_dataframe(
+        cell_ids=[cell_id2old_id[i] for i in cell_id],
+        cell_id_column=cell_id_column,
+        analysis_df=analysis_df,
     )
-    clustering_df = pd.merge(zarr_df, analysis_df, how="left", on=cell_id_column)
-    clusters_names = [col for col in analysis_df.columns if col != cell_id_column]
+    clusters_names = [col for col in clustering_df.columns if col != cell_id_column]
 
     clusters_dict = {
         cluster: {

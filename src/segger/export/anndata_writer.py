@@ -18,10 +18,21 @@ from scipy import sparse as sp
 
 from segger.export.output_formats import OutputFormat, register_writer
 from segger.export.merged_writer import merge_predictions_with_transcripts
+from segger.utils.fragment_outputs import (
+    FRAGMENT_FLAG_COLUMN,
+    OBJECT_GROUP_COLUMN,
+    OBJECT_TYPE_CELL,
+    OBJECT_TYPE_COLUMN,
+    OBJECT_TYPE_FRAGMENT,
+    split_h5ad_output_paths,
+    split_transcripts_by_object_type,
+    with_fragment_annotations,
+)
 
 
 def build_anndata_table(
     transcripts: pl.DataFrame,
+    var_transcripts: Optional[pl.DataFrame] = None,
     cell_id_column: str = "segger_cell_id",
     feature_column: str = "feature_name",
     x_column: Optional[str] = "x",
@@ -57,21 +68,24 @@ def build_anndata_table(
     if feature_column not in transcripts.columns:
         raise ValueError(f"Missing feature column: {feature_column}")
 
-    assigned = transcripts.filter(pl.col(cell_id_column).is_not_null())
-    if unassigned_value is not None:
-        col_dtype = transcripts.schema.get(cell_id_column)
-        try:
-            compare_value = pl.Series([unassigned_value]).cast(col_dtype).item()
-            filter_expr = pl.col(cell_id_column) != compare_value
-        except Exception:
-            filter_expr = (
-                pl.col(cell_id_column).cast(pl.Utf8) != str(unassigned_value)
-            )
-        assigned = assigned.filter(filter_expr)
+    transcripts = with_fragment_annotations(
+        transcripts,
+        cell_id_column=cell_id_column,
+        unassigned_value=unassigned_value,
+    )
+    var_source = var_transcripts if var_transcripts is not None else transcripts
+    if feature_column not in var_source.columns:
+        raise ValueError(f"Missing feature column: {feature_column}")
+
+    assigned = (
+        transcripts
+        .filter(pl.col(cell_id_column).is_not_null())
+        .filter(pl.col(OBJECT_TYPE_COLUMN) != "unassigned")
+    )
 
     # Gene list from all transcripts (even if no assignments)
     var_idx = (
-        transcripts
+        var_source
         .select(feature_column)
         .unique()
         .sort(feature_column)
@@ -87,6 +101,9 @@ def build_anndata_table(
             var_index = pd.Index(var_idx, name=feature_column)
         X = sp.csr_matrix((0, len(var_index)))
         adata = AnnData(X=X, obs=pd.DataFrame(index=obs_index), var=pd.DataFrame(index=var_index))
+        adata.obs[OBJECT_TYPE_COLUMN] = pd.Series([], dtype="object")
+        adata.obs[OBJECT_GROUP_COLUMN] = pd.Series([], dtype="object")
+        adata.obs[FRAGMENT_FLAG_COLUMN] = pd.Series([], dtype=bool)
         if region is not None:
             adata.obs["region"] = region
         if region_key is not None:
@@ -137,6 +154,26 @@ def build_anndata_table(
         X=X,
         obs=pd.DataFrame(index=pd.Index(obs_ids, name=cell_id_column)),
         var=pd.DataFrame(index=pd.Index(var_ids, name=feature_column)),
+    )
+
+    obs_meta = (
+        assigned
+        .group_by(cell_id_column)
+        .agg(
+            [
+                pl.col(OBJECT_TYPE_COLUMN).first().alias(OBJECT_TYPE_COLUMN),
+                pl.col(OBJECT_GROUP_COLUMN).first().alias(OBJECT_GROUP_COLUMN),
+                pl.col(FRAGMENT_FLAG_COLUMN).max().alias(FRAGMENT_FLAG_COLUMN),
+            ]
+        )
+        .to_pandas()
+        .set_index(cell_id_column)
+        .reindex(adata.obs.index)
+    )
+    adata.obs[OBJECT_TYPE_COLUMN] = obs_meta[OBJECT_TYPE_COLUMN].fillna(OBJECT_TYPE_CELL)
+    adata.obs[OBJECT_GROUP_COLUMN] = obs_meta[OBJECT_GROUP_COLUMN].fillna("cells")
+    adata.obs[FRAGMENT_FLAG_COLUMN] = (
+        obs_meta[FRAGMENT_FLAG_COLUMN].fillna(False).astype(bool)
     )
 
     # Add centroid coordinates if present
@@ -214,12 +251,15 @@ class AnnDataWriter:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / output_name
+        output_paths = split_h5ad_output_paths(output_path)
 
-        if output_path.exists() and not overwrite:
-            raise FileExistsError(
-                f"Output path exists: {output_path}. "
-                "Use overwrite=True to replace."
-            )
+        if not overwrite:
+            for path in output_paths.values():
+                if path.exists():
+                    raise FileExistsError(
+                        f"Output path exists: {path}. "
+                        "Use overwrite=True to replace."
+                    )
 
         merged = merge_predictions_with_transcripts(
             predictions=predictions,
@@ -229,9 +269,35 @@ class AnnDataWriter:
             similarity_column=similarity_column,
             unassigned_marker=self.unassigned_marker,
         )
+        split_frames = split_transcripts_by_object_type(
+            merged,
+            cell_id_column=cell_id_column,
+            unassigned_value=self.unassigned_marker,
+        )
 
         adata = build_anndata_table(
-            transcripts=merged,
+            transcripts=split_frames["all"],
+            var_transcripts=merged,
+            cell_id_column=cell_id_column,
+            feature_column=feature_column,
+            x_column=x_column,
+            y_column=y_column,
+            z_column=z_column,
+            unassigned_value=self.unassigned_marker,
+        )
+        cells_adata = build_anndata_table(
+            transcripts=split_frames[OBJECT_TYPE_CELL],
+            var_transcripts=merged,
+            cell_id_column=cell_id_column,
+            feature_column=feature_column,
+            x_column=x_column,
+            y_column=y_column,
+            z_column=z_column,
+            unassigned_value=self.unassigned_marker,
+        )
+        fragments_adata = build_anndata_table(
+            transcripts=split_frames[OBJECT_TYPE_FRAGMENT],
+            var_transcripts=merged,
             cell_id_column=cell_id_column,
             feature_column=feature_column,
             x_column=x_column,
@@ -246,5 +312,7 @@ class AnnDataWriter:
         if self.compression_opts is not None:
             write_kwargs["compression_opts"] = self.compression_opts
 
-        adata.write_h5ad(output_path, **write_kwargs)
+        adata.write_h5ad(output_paths["combined"], **write_kwargs)
+        cells_adata.write_h5ad(output_paths[OBJECT_TYPE_CELL], **write_kwargs)
+        fragments_adata.write_h5ad(output_paths[OBJECT_TYPE_FRAGMENT], **write_kwargs)
         return output_path
