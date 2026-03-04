@@ -66,10 +66,19 @@ def _check_sopa() -> bool:
         return False
 
 
+def _check_cellxgene_census() -> bool:
+    """Check if cellxgene-census is available."""
+    try:
+        return importlib.util.find_spec("cellxgene_census") is not None
+    except Exception:
+        return False
+
+
 # Availability flags (evaluated once at import time)
 SPATIALDATA_AVAILABLE: bool = _check_spatialdata()
 SPATIALDATA_IO_AVAILABLE: bool = _check_spatialdata_io()
 SOPA_AVAILABLE: bool = _check_sopa()
+CELLXGENE_CENSUS_AVAILABLE: bool = _check_cellxgene_census()
 
 
 # -----------------------------------------------------------------------------
@@ -111,6 +120,17 @@ Or install sopa directly:
 
 For all SpatialData features including SOPA:
     pip install segger[spatialdata-all]
+"""
+
+CELLXGENE_CENSUS_INSTALL_MSG = """
+cellxgene-census is not installed. This package is required for automatic
+scRNA-seq reference fetching from CellxGENE Census.
+
+To install Census support:
+    pip install segger[census]
+
+Or install cellxgene-census directly:
+    pip install cellxgene-census>=2.0.0
 """
 
 RAPIDS_INSTALL_MSG = """
@@ -181,6 +201,25 @@ def require_sopa() -> "types.ModuleType":
     return sopa
 
 
+def require_cellxgene_census() -> "types.ModuleType":
+    """Import and return cellxgene_census, raising ImportError if not available.
+
+    Returns
+    -------
+    types.ModuleType
+        The cellxgene_census module.
+
+    Raises
+    ------
+    ImportError
+        If cellxgene-census is not installed, with installation instructions.
+    """
+    if not CELLXGENE_CENSUS_AVAILABLE:
+        raise ImportError(CELLXGENE_CENSUS_INSTALL_MSG)
+    import cellxgene_census
+    return cellxgene_census
+
+
 # -----------------------------------------------------------------------------
 # Decorators for requiring optional dependencies
 # -----------------------------------------------------------------------------
@@ -248,6 +287,26 @@ def requires_sopa(func: F) -> F:
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         require_sopa()
+        return func(*args, **kwargs)
+    return wrapper  # type: ignore[return-value]
+
+
+def requires_cellxgene_census(func: F) -> F:
+    """Decorator that raises ImportError if cellxgene-census is not available.
+
+    Parameters
+    ----------
+    func
+        Function that requires cellxgene-census.
+
+    Returns
+    -------
+    F
+        Wrapped function that checks for cellxgene-census before execution.
+    """
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        require_cellxgene_census()
         return func(*args, **kwargs)
     return wrapper  # type: ignore[return-value]
 

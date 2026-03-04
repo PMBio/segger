@@ -44,6 +44,10 @@ spatialdata-io = [
     "spatialdata-io>=0.6.0",
 ]
 
+census = [
+    "cellxgene-census>=2.0.0",
+]
+
 sopa = [
     "sopa>=2.0.0",
     "spatialdata>=0.7.2",
