@@ -304,39 +304,89 @@ def _get_anndata_compat(
     census_handle,
     *,
     organism: str,
-    obs_value_filter: str,
+    obs_value_filter: str | None,
+    obs_coords=None,
 ):
     """Call census.get_anndata() across argument-name variants."""
-    try:
-        return census_module.get_anndata(
-            census_handle,
-            organism=organism,
-            obs_value_filter=obs_value_filter,
-            obs_column_names=[
+    new_kwargs = {
+        "organism": organism,
+        "obs_value_filter": obs_value_filter,
+        "obs_column_names": [
+            "cell_type",
+            "tissue_general",
+            "dataset_id",
+            "assay",
+            "donor_id",
+        ],
+        "var_column_names": ["feature_name"],
+    }
+    old_kwargs = {
+        "organism": organism,
+        "obs_value_filter": obs_value_filter,
+        "column_names": {
+            "obs": [
                 "cell_type",
                 "tissue_general",
                 "dataset_id",
                 "assay",
                 "donor_id",
             ],
-            var_column_names=["feature_name"],
-        )
+            "var": ["feature_name"],
+        },
+    }
+    if obs_coords is not None:
+        new_kwargs["obs_coords"] = obs_coords
+        old_kwargs["obs_coords"] = obs_coords
+
+    try:
+        return census_module.get_anndata(census_handle, **new_kwargs)
     except TypeError:
-        return census_module.get_anndata(
-            census_handle,
-            organism=organism,
-            obs_value_filter=obs_value_filter,
-            column_names={
-                "obs": [
-                    "cell_type",
-                    "tissue_general",
-                    "dataset_id",
-                    "assay",
-                    "donor_id",
-                ],
-                "var": ["feature_name"],
-            },
-        )
+        try:
+            return census_module.get_anndata(census_handle, **old_kwargs)
+        except TypeError:
+            # Older variants may not support obs_coords. Fall back to filter-only call.
+            if obs_coords is None:
+                raise
+            new_no_coords = dict(new_kwargs)
+            old_no_coords = dict(old_kwargs)
+            new_no_coords.pop("obs_coords", None)
+            old_no_coords.pop("obs_coords", None)
+            try:
+                return census_module.get_anndata(census_handle, **new_no_coords)
+            except TypeError:
+                return census_module.get_anndata(census_handle, **old_no_coords)
+
+
+def _get_obs_compat(
+    census_module,
+    census_handle,
+    *,
+    organism: str,
+    value_filter: str,
+):
+    """Call census.get_obs() when available; return None if not supported."""
+    get_obs = getattr(census_module, "get_obs", None)
+    if not callable(get_obs):
+        return None
+    call_kwargs = {
+        "value_filter": value_filter,
+        "column_names": ["soma_joinid", "cell_type"],
+    }
+
+    # Try known call styles across Census releases; if all fail, return None
+    # so fetch_reference uses the legacy full-query fallback.
+    for args, kwargs in (
+        ((census_handle,), {"organism": organism, **call_kwargs}),
+        ((census_handle, organism), call_kwargs),
+    ):
+        try:
+            out = get_obs(*args, **kwargs)
+            if hasattr(out, "to_pandas"):
+                out = out.to_pandas()
+            return out
+        except TypeError:
+            continue
+    return None
 
 
 def _tissue_dir(cache_dir: Path, organism: str, tissue: str) -> Path:
@@ -452,13 +502,64 @@ def fetch_reference(
             f"and disease == 'normal'"
         )
 
-        with _progress_spinner("Querying and downloading reference", enabled=progress):
-            adata: _ad.AnnData = _get_anndata_compat(
+        obs_df = None
+        with _progress_spinner("Querying candidate cell metadata", enabled=progress):
+            obs_df = _get_obs_compat(
                 census,
                 c,
                 organism=organism,
-                obs_value_filter=value_filter,
+                value_filter=value_filter,
             )
+
+        if obs_df is not None:
+            if "soma_joinid" not in obs_df.columns:
+                obs_df = obs_df.reset_index()
+            if "soma_joinid" in obs_df.columns and "cell_type" in obs_df.columns:
+                obs_df["cell_type"] = (
+                    obs_df["cell_type"].astype("string").fillna("Unknown")
+                )
+                if len(obs_df) == 0:
+                    raise ValueError(
+                        f"No cells found in CellxGENE Census for tissue_general='{normalized}'. "
+                        f"Original query tissue: '{tissue}'. "
+                        f"Try `segger atlas fetch --help` or check CellxGENE Census documentation."
+                    )
+                rng = np.random.default_rng(42)
+                sampled_joinids: list[int] = []
+                for _, group in obs_df.groupby("cell_type", dropna=False):
+                    ids = group["soma_joinid"].astype("int64").to_numpy()
+                    if len(ids) <= max_cells_per_type:
+                        sampled_joinids.extend(ids.tolist())
+                    else:
+                        sampled_joinids.extend(
+                            rng.choice(ids, size=max_cells_per_type, replace=False).tolist()
+                        )
+                sampled_joinids.sort()
+
+                with _progress_spinner("Downloading sampled reference matrix", enabled=progress):
+                    adata: _ad.AnnData = _get_anndata_compat(
+                        census,
+                        c,
+                        organism=organism,
+                        obs_value_filter=None,
+                        obs_coords=sampled_joinids,
+                    )
+            else:
+                with _progress_spinner("Querying and downloading reference", enabled=progress):
+                    adata: _ad.AnnData = _get_anndata_compat(
+                        census,
+                        c,
+                        organism=organism,
+                        obs_value_filter=value_filter,
+                    )
+        else:
+            with _progress_spinner("Querying and downloading reference", enabled=progress):
+                adata: _ad.AnnData = _get_anndata_compat(
+                    census,
+                    c,
+                    organism=organism,
+                    obs_value_filter=value_filter,
+                )
 
     if adata.n_obs == 0:
         raise ValueError(
@@ -482,20 +583,21 @@ def fetch_reference(
             stacklevel=2,
         )
 
-    # Stratified subsample
-    rng = np.random.default_rng(42)
-    keep_indices: list[int] = []
-    for ct in cell_types:
-        mask = adata.obs["cell_type"] == ct
-        indices = np.where(mask)[0]
-        if len(indices) <= max_cells_per_type:
-            keep_indices.extend(indices.tolist())
-        else:
-            chosen = rng.choice(indices, size=max_cells_per_type, replace=False)
-            keep_indices.extend(chosen.tolist())
-
-    keep_indices.sort()
-    adata = adata[keep_indices].copy()
+    # Safety cap for legacy fallback path that may have fetched all cells.
+    if adata.n_obs > (max_cells_per_type * max(len(cell_types), 1)):
+        rng = np.random.default_rng(42)
+        keep_indices: list[int] = []
+        for ct in cell_types:
+            mask = adata.obs["cell_type"] == ct
+            indices = np.where(mask)[0]
+            if len(indices) <= max_cells_per_type:
+                keep_indices.extend(indices.tolist())
+            else:
+                keep_indices.extend(
+                    rng.choice(indices, size=max_cells_per_type, replace=False).tolist()
+                )
+        keep_indices.sort()
+        adata = adata[keep_indices].copy()
 
     # Re-categorize after subsample
     adata.obs["cell_type"] = adata.obs["cell_type"].cat.remove_unused_categories()
