@@ -443,6 +443,11 @@ def segment(
              "Requires: pip install segger[census]",
         group=group_loss,
     )] = None,
+    reference_cache_dir: Annotated[Path | None, Parameter(
+        help="Cache directory for auto-fetched scRNA references (used with --tissue-type). "
+             "Defaults to <output-directory>/.segger_references.",
+        group=group_loss,
+    )] = None,
 
     # Prediction parameters
     min_similarity: Annotated[float | None, Parameter(
@@ -504,7 +509,12 @@ def segment(
         )
     if tissue_type:
         from ..data.atlas import fetch_reference as _fetch_ref
-        _ref = _fetch_ref(tissue_type)
+        resolved_reference_cache_dir = (
+            Path(reference_cache_dir)
+            if reference_cache_dir is not None
+            else (Path(output_directory) / ".segger_references")
+        )
+        _ref = _fetch_ref(tissue_type, cache_dir=resolved_reference_cache_dir)
         scrna_reference_path = _ref.h5ad_path
         scrna_celltype_column = "cell_type"
 
@@ -1116,6 +1126,11 @@ def validate(
              "Requires: pip install segger[census]",
         group=group_validation_inputs,
     )] = None,
+    reference_cache_dir: Annotated[Path | None, Parameter(
+        help="Cache directory for auto-fetched scRNA references (used with --tissue-type). "
+             "Defaults to ./.segger_references in current working directory.",
+        group=group_validation_inputs,
+    )] = None,
     assigned: Annotated[bool, Parameter(
         help="Compute transcript assignment coverage. If no metric flags are set, all metrics run.",
         group=group_validation_assigned,
@@ -1244,7 +1259,12 @@ def validate(
         )
     if tissue_type:
         from ..data.atlas import fetch_reference as _fetch_ref
-        _ref = _fetch_ref(tissue_type)
+        resolved_reference_cache_dir = (
+            Path(reference_cache_dir)
+            if reference_cache_dir is not None
+            else (Path.cwd() / ".segger_references")
+        )
+        _ref = _fetch_ref(tissue_type, cache_dir=resolved_reference_cache_dir)
         scrna_reference_path = _ref.h5ad_path
         scrna_celltype_column = "cell_type"
 
@@ -1921,11 +1941,17 @@ def fetch(
         help="Re-download even if already cached.",
         group=group_atlas,
     )] = False,
+    cache_dir: Annotated[Path | None, Parameter(
+        help="Directory for cached references. Defaults to ./.segger_references in current working directory.",
+        group=group_atlas,
+    )] = None,
 ):
     """Fetch a tissue-specific scRNA-seq reference from CellxGENE Census."""
     from ..data.atlas import fetch_reference
+    resolved_cache_dir = Path(cache_dir) if cache_dir is not None else (Path.cwd() / ".segger_references")
     ref = fetch_reference(
         tissue,
+        cache_dir=resolved_cache_dir,
         organism=organism,
         census_version=census_version,
         max_cells_per_type=max_cells_per_type,
@@ -1941,13 +1967,20 @@ def fetch(
 
 
 @atlas_app.command(name="list")
-def list_refs():
+def list_refs(
+    cache_dir: Annotated[Path | None, Parameter(
+        help="Directory for cached references. Defaults to ./.segger_references in current working directory.",
+        group=group_atlas,
+    )] = None,
+):
     """List all locally cached scRNA-seq references."""
     from ..data.atlas import list_cached_references
-    refs = list_cached_references()
+    resolved_cache_dir = Path(cache_dir) if cache_dir is not None else (Path.cwd() / ".segger_references")
+    refs = list_cached_references(cache_dir=resolved_cache_dir)
     if not refs:
-        print("No cached references found.")
+        print(f"No cached references found in: {resolved_cache_dir}")
         return
+    print(f"Cache dir: {resolved_cache_dir}")
     for ref in refs:
         flag = " [immune-only]" if ref.immune_only else ""
         print(
@@ -1962,12 +1995,17 @@ def clear(
         help="Remove only this tissue's cache. If omitted, clear all.",
         group=group_atlas,
     )] = None,
+    cache_dir: Annotated[Path | None, Parameter(
+        help="Directory for cached references. Defaults to ./.segger_references in current working directory.",
+        group=group_atlas,
+    )] = None,
 ):
     """Remove cached scRNA-seq references."""
     from ..data.atlas import clear_cache
-    removed = clear_cache(tissue=tissue)
+    resolved_cache_dir = Path(cache_dir) if cache_dir is not None else (Path.cwd() / ".segger_references")
+    removed = clear_cache(tissue=tissue, cache_dir=resolved_cache_dir)
     if removed == 0:
-        print("Nothing to remove.")
+        print(f"Nothing to remove in: {resolved_cache_dir}")
     else:
         label = f"tissue '{tissue}'" if tissue else "all tissues"
-        print(f"Removed {removed} cached reference(s) for {label}.")
+        print(f"Removed {removed} cached reference(s) for {label} in: {resolved_cache_dir}")
