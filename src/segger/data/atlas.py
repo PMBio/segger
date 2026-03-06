@@ -215,6 +215,26 @@ def _require_census():
     return require_cellxgene_census()
 
 
+def _open_census(census_module, census_version: str):
+    """Open a Census handle across API variants.
+
+    Recent cellxgene-census releases use ``open_soma``; older versions use
+    ``open``. This helper supports both.
+    """
+    open_soma = getattr(census_module, "open_soma", None)
+    if callable(open_soma):
+        return open_soma(census_version=census_version)
+
+    open_legacy = getattr(census_module, "open", None)
+    if callable(open_legacy):
+        return open_legacy(census_version=census_version)
+
+    raise AttributeError(
+        "cellxgene_census does not expose a supported opener "
+        "(expected open_soma or open)."
+    )
+
+
 def _tissue_dir(cache_dir: Path, organism: str, tissue: str) -> Path:
     """Return ``<cache_dir>/<organism>/<tissue>/``."""
     safe_tissue = tissue.replace(" ", "_")
@@ -312,7 +332,7 @@ def fetch_reference(
     import anndata as _ad
     import numpy as np
 
-    with census.open(census_version=census_version) as c:
+    with _open_census(census, census_version=census_version) as c:
         # Value filter for Census query
         value_filter = (
             f"tissue_general == '{normalized}' "

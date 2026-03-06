@@ -210,6 +210,67 @@ class TestFetchReferenceNoCensus:
 
 
 # ---------------------------------------------------------------------------
+# Census opener compatibility
+# ---------------------------------------------------------------------------
+
+class TestOpenCensusCompatibility:
+    def test_prefers_open_soma_when_available(self):
+        events: list[str] = []
+
+        class DummyCtx:
+            def __enter__(self):
+                events.append("enter")
+                return "ctx"
+
+            def __exit__(self, exc_type, exc, tb):
+                events.append("exit")
+                return False
+
+        class CensusModule:
+            def open_soma(self, *, census_version):
+                events.append(f"open_soma:{census_version}")
+                return DummyCtx()
+
+            def open(self, *, census_version):  # pragma: no cover - should not be used
+                events.append(f"open:{census_version}")
+                return DummyCtx()
+
+        with atlas._open_census(CensusModule(), census_version="stable") as handle:
+            assert handle == "ctx"
+
+        assert events == ["open_soma:stable", "enter", "exit"]
+
+    def test_falls_back_to_open_when_open_soma_missing(self):
+        events: list[str] = []
+
+        class DummyCtx:
+            def __enter__(self):
+                events.append("enter")
+                return "ctx"
+
+            def __exit__(self, exc_type, exc, tb):
+                events.append("exit")
+                return False
+
+        class CensusModule:
+            def open(self, *, census_version):
+                events.append(f"open:{census_version}")
+                return DummyCtx()
+
+        with atlas._open_census(CensusModule(), census_version="latest") as handle:
+            assert handle == "ctx"
+
+        assert events == ["open:latest", "enter", "exit"]
+
+    def test_raises_when_no_supported_open_function(self):
+        class CensusModule:
+            pass
+
+        with pytest.raises(AttributeError, match="open_soma or open"):
+            atlas._open_census(CensusModule(), census_version="stable")
+
+
+# ---------------------------------------------------------------------------
 # list_cached_references
 # ---------------------------------------------------------------------------
 
