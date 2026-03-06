@@ -23,6 +23,7 @@ import difflib
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -240,33 +241,62 @@ def _open_census(census_module, census_version: str):
 
 @contextmanager
 def _progress_spinner(message: str, *, enabled: bool, interval_sec: float = 5.0):
-    """Print periodic progress heartbeats while a long call is running."""
+    """Show progress for long calls.
+
+    On TTYs, render a single in-place spinner line.
+    On non-TTY outputs (logs/files), emit periodic heartbeat lines.
+    """
     if not enabled:
         yield
         return
 
     stop_event = threading.Event()
     start = time.monotonic()
+    stream = sys.stderr
+    is_tty = bool(getattr(stream, "isatty", lambda: False)())
+    tick_sec = 0.25 if is_tty else interval_sec
+    lock = threading.Lock()
+
+    def _write(text: str, *, in_place: bool = False, newline: bool = True) -> None:
+        with lock:
+            if in_place and is_tty:
+                stream.write("\r\033[K" + text)
+                if newline:
+                    stream.write("\n")
+            else:
+                stream.write(text + ("\n" if newline else ""))
+            stream.flush()
 
     def _worker():
         frames = "|/-\\"
         idx = 0
-        while not stop_event.wait(interval_sec):
+        while not stop_event.wait(tick_sec):
             elapsed = int(time.monotonic() - start)
             frame = frames[idx % len(frames)]
             idx += 1
-            print(f"[atlas] {message} {frame} ({elapsed}s)", flush=True)
+            if is_tty:
+                _write(f"[atlas] {message} {frame} ({elapsed}s)", in_place=True, newline=False)
+            else:
+                _write(f"[atlas] {message} {frame} ({elapsed}s)")
 
-    print(f"[atlas] {message} ...", flush=True)
+    if is_tty:
+        _write(f"[atlas] {message} ...", in_place=True, newline=False)
+    else:
+        _write(f"[atlas] {message} ...")
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
     try:
         yield
+    except Exception:
         elapsed = int(time.monotonic() - start)
-        print(f"[atlas] {message} done ({elapsed}s)", flush=True)
+        _write(f"[atlas] {message} failed ({elapsed}s)", in_place=is_tty, newline=True)
+        raise
+    else:
+        elapsed = int(time.monotonic() - start)
+        _write(f"[atlas] {message} done ({elapsed}s)", in_place=is_tty, newline=True)
     finally:
         stop_event.set()
-        thread.join(timeout=interval_sec + 1.0)
+        thread.join(timeout=max(tick_sec, interval_sec) + 1.0)
 
 
 def _get_anndata_compat(
