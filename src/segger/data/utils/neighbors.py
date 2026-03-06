@@ -10,6 +10,7 @@ import torch
 import cuml
 import cudf
 import gc
+import warnings
 
 from ...io import TrainingTranscriptFields, TrainingBoundaryFields
 from ...geometry import points_in_polygons
@@ -159,10 +160,13 @@ def setup_transcripts_graph(
     if use_3d == "auto":
         use_3d = has_z and tx[tx_fields.z].null_count() < len(tx)
     elif use_3d is True and not has_z:
-        raise ValueError(
+        warnings.warn(
             f"use_3d=True but z column '{tx_fields.z}' not found in transcripts. "
-            f"Available columns: {tx.columns}"
+            "Falling back to 2D graph construction.",
+            RuntimeWarning,
+            stacklevel=2,
         )
+        use_3d = False
     if use_3d and has_z:
         coord_cols.append(tx_fields.z)
 
@@ -212,10 +216,13 @@ def setup_prediction_graph(
         if use_3d == "auto":
             use_3d = has_z and tx[tx_fields.z].null_count() < len(tx)
         elif use_3d is True and not has_z:
-            raise ValueError(
+            warnings.warn(
                 f"use_3d=True but z column '{tx_fields.z}' not found in transcripts. "
-                f"Available columns: {tx.columns}"
+                "Falling back to 2D graph construction.",
+                RuntimeWarning,
+                stacklevel=2,
             )
+            use_3d = False
         if use_3d and has_z:
             coord_cols.append(tx_fields.z)
 
@@ -238,6 +245,18 @@ def setup_prediction_graph(
     boundary_type = (bd_fields.cell_value if mode == "cell"
                      else bd_fields.nucleus_value)
     polygons = bd[bd[bd_fields.boundary_type] == boundary_type].geometry
+    if polygons.empty:
+        warnings.warn(
+            f"No '{boundary_type}' boundaries found for prediction graph. "
+            "Falling back to all available boundaries.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        polygons = bd.geometry
+    if polygons.empty:
+        raise ValueError(
+            "Prediction graph construction requires at least one boundary polygon."
+        )
 
     # Multiplicative polygon scaling around centroid.
     # scale_factor > 1 expands, < 1 shrinks.
