@@ -488,12 +488,37 @@ class CosMXPreprocessor(ISTPreprocessor):
         ]
 
     @staticmethod
+    def _has_mask_inputs(data_dir: Path) -> bool:
+        bd_fields = CosMxBoundaryFields()
+        return (
+            len(list(data_dir.glob(bd_fields.compartment_labels_dirname))) == 1
+            and len(list(data_dir.glob(bd_fields.cell_labels_dirname))) == 1
+            and len(list(data_dir.glob(bd_fields.fov_positions_filename))) == 1
+        )
+
+    @staticmethod
+    def _has_native_schema(columns: list[str] | set[str]) -> bool:
+        raw = CosMxTranscriptFields()
+        return {raw.x, raw.y, raw.feature}.issubset(set(columns))
+
+    @staticmethod
     def _validate_directory(data_dir: Path):
 
-        bd_fields = CosMxBoundaryFields()
         tx_fields = CosMxTranscriptFields()
         tx_path = CosMXPreprocessor._resolve_transcripts_path(data_dir)
-        tx_columns = _lazyframe_column_names(CosMXPreprocessor._scan_transcripts_file(tx_path))
+        tx_columns = _lazyframe_column_names(
+            CosMXPreprocessor._scan_transcripts_file(tx_path)
+        )
+
+        # Keep auto-inference strict: only match CosMX when native markers exist.
+        has_native_file = len(list(data_dir.glob(tx_fields.filename))) == 1
+        has_native_schema = CosMXPreprocessor._has_native_schema(tx_columns)
+        has_native_masks = CosMXPreprocessor._has_mask_inputs(data_dir)
+        if not (has_native_file or has_native_schema or has_native_masks):
+            raise IOError(
+                "Directory does not look like a CosMX output layout "
+                "(missing native transcript schema and mask markers)."
+            )
 
         x_col = _first_existing(
             tx_columns,
@@ -526,12 +551,6 @@ class CosMXPreprocessor(ISTPreprocessor):
                 f"CosMx transcripts file '{tx_path.name}' is missing minimum usable columns "
                 f"{missing_tx_columns}."
             )
-
-        _ = (
-            len(list(data_dir.glob(bd_fields.compartment_labels_dirname))) == 1
-            and len(list(data_dir.glob(bd_fields.cell_labels_dirname))) == 1
-            and len(list(data_dir.glob(bd_fields.fov_positions_filename))) == 1
-        )
 
     @staticmethod
     def _resolve_transcripts_path(data_dir: Path) -> Path:
@@ -677,11 +696,7 @@ class CosMXPreprocessor(ISTPreprocessor):
         std = StandardBoundaryFields()
         std_tx = StandardTranscriptFields()
 
-        has_mask_inputs = (
-            len(list(self.data_dir.glob(raw.compartment_labels_dirname))) == 1
-            and len(list(self.data_dir.glob(raw.cell_labels_dirname))) == 1
-            and len(list(self.data_dir.glob(raw.fov_positions_filename))) == 1
-        )
+        has_mask_inputs = self._has_mask_inputs(self.data_dir)
 
         cells = _empty_boundaries()
         nuclei = _empty_boundaries()
@@ -771,7 +786,6 @@ class XeniumPreprocessor(ISTPreprocessor):
     def _validate_directory(data_dir: Path):
 
         tx_fields = XeniumTranscriptFields()
-        bd_fields = XeniumBoundaryFields()
         tx_matches = list(data_dir.glob(tx_fields.filename))
         if len(tx_matches) != 1:
             raise IOError(
@@ -781,6 +795,17 @@ class XeniumPreprocessor(ISTPreprocessor):
 
         tx_lf = pl.scan_parquet(tx_matches[0], parallel="row_groups")
         tx_columns = _lazyframe_column_names(tx_lf)
+
+        # Keep auto-inference strict: only match Xenium when native schema exists.
+        has_native_schema = {tx_fields.x, tx_fields.y, tx_fields.feature}.issubset(
+            set(tx_columns)
+        )
+        if not has_native_schema:
+            raise IOError(
+                "Directory does not look like a Xenium output layout "
+                "(missing native Xenium transcript columns)."
+            )
+
         x_col = _first_existing(tx_columns, [tx_fields.x, "x", "global_x", "x_global_px"])
         y_col = _first_existing(tx_columns, [tx_fields.y, "y", "global_y", "y_global_px"])
         feature_col = _first_existing(tx_columns, [tx_fields.feature, "gene", "target"])
@@ -801,11 +826,6 @@ class XeniumPreprocessor(ISTPreprocessor):
                 "Xenium transcripts are missing minimum usable columns "
                 "(x, y, feature, cell/nucleus assignment)."
             )
-
-        _ = (
-            len(list(data_dir.glob(bd_fields.cell_filename))) == 1
-            and len(list(data_dir.glob(bd_fields.nucleus_filename))) == 1
-        )
 
     @cached_property
     def transcripts(self) -> pl.DataFrame:
@@ -891,15 +911,8 @@ class XeniumPreprocessor(ISTPreprocessor):
                 .alias(std.compartment)
             )
 
-        lf = lf.with_columns(
-            [
-                compartment_expr,
-                pl.when(pl.col(std.compartment) != std.extracellular_value)
-                .then(assignment_expr)
-                .otherwise(None)
-                .alias(std.cell_id),
-            ]
-        )
+        lf = lf.with_columns([compartment_expr])
+        lf = lf.with_columns([assignment_expr.alias(std.cell_id)])
 
         rename_map = {x_col: std.x, y_col: std.y, feature_col: std.feature}
         select_cols = [std.row_index, std.x, std.y, std.feature, std.cell_id, std.compartment]
@@ -1038,6 +1051,15 @@ class MerscopePreprocessor(ISTPreprocessor):
         tx_path = MerscopePreprocessor._resolve_transcripts_path(data_dir)
         tx_lf = MerscopePreprocessor._scan_transcripts_file(tx_path)
         tx_columns = _lazyframe_column_names(tx_lf)
+
+        # Keep auto-inference strict: only match MERSCOPE when native markers exist.
+        has_native_file = len(list(data_dir.glob(raw_tx.filename))) == 1
+        has_native_schema = {raw_tx.x, raw_tx.y, raw_tx.feature}.issubset(set(tx_columns))
+        if not (has_native_file or has_native_schema):
+            raise IOError(
+                "Directory does not look like a MERSCOPE output layout "
+                "(missing native MERSCOPE transcript markers)."
+            )
 
         x_col = _first_existing(tx_columns, [raw_tx.x, "x", "x_location"])
         y_col = _first_existing(tx_columns, [raw_tx.y, "y", "y_location"])
@@ -1427,10 +1449,6 @@ def _infer_platform(data_dir: Path) -> str:
     elif len(matches) > 1:
         tie_break = _platform_tiebreak(data_dir, matches)
         if tie_break is not None:
-            _warn_minimal_fallback(
-                "Multiple platform schemas matched; selecting "
-                f"'{tie_break}' using directory/schema tie-break heuristics."
-            )
             return tie_break
         conflicting_platforms = ", ".join(matches)
         raise ValueError(
