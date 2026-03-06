@@ -45,7 +45,7 @@ spatialdata-io = [
 ]
 
 census = [
-    "cellxgene-census>=2.0.0",
+    "cellxgene-census>=1.2.1",
 ]
 
 sopa = [

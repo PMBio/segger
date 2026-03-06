@@ -130,7 +130,7 @@ To install Census support:
     pip install segger[census]
 
 Or install cellxgene-census directly:
-    pip install cellxgene-census>=2.0.0
+    pip install "cellxgene-census>=1.2.1"
 """
 
 RAPIDS_INSTALL_MSG = """
