@@ -270,6 +270,54 @@ class TestOpenCensusCompatibility:
             atlas._open_census(CensusModule(), census_version="stable")
 
 
+class TestGetAnndataCompatibility:
+    def test_uses_new_obs_var_column_names_api(self):
+        calls: list[tuple[str, dict]] = []
+
+        class CensusModule:
+            def get_anndata(self, handle, **kwargs):
+                calls.append(("new", kwargs))
+                return "ok-new"
+
+        out = atlas._get_anndata_compat(
+            CensusModule(),
+            object(),
+            organism="homo_sapiens",
+            obs_value_filter="x == y",
+        )
+        assert out == "ok-new"
+        assert len(calls) == 1
+        kwargs = calls[0][1]
+        assert "obs_column_names" in kwargs
+        assert "var_column_names" in kwargs
+        assert "column_names" not in kwargs
+
+    def test_falls_back_to_column_names_on_type_error(self):
+        calls: list[dict] = []
+
+        class CensusModule:
+            def __init__(self):
+                self.first = True
+
+            def get_anndata(self, handle, **kwargs):
+                calls.append(kwargs)
+                if self.first:
+                    self.first = False
+                    raise TypeError("unexpected keyword argument 'obs_column_names'")
+                return "ok-old"
+
+        out = atlas._get_anndata_compat(
+            CensusModule(),
+            object(),
+            organism="homo_sapiens",
+            obs_value_filter="x == y",
+        )
+        assert out == "ok-old"
+        assert len(calls) == 2
+        assert "obs_column_names" in calls[0]
+        assert "column_names" in calls[1]
+
+
 # ---------------------------------------------------------------------------
 # list_cached_references
 # ---------------------------------------------------------------------------

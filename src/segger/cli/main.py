@@ -1930,6 +1930,7 @@ def fetch(
         census_version=census_version,
         max_cells_per_type=max_cells_per_type,
         force=force,
+        progress=True,
     )
     print(f"Tissue:       {ref.tissue}")
     print(f"Organism:     {ref.organism}")

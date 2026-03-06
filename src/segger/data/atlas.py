@@ -24,10 +24,13 @@ import json
 import os
 import shutil
 import tempfile
+import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+from contextlib import contextmanager
 
 if TYPE_CHECKING:
     import anndata as ad
@@ -235,6 +238,77 @@ def _open_census(census_module, census_version: str):
     )
 
 
+@contextmanager
+def _progress_spinner(message: str, *, enabled: bool, interval_sec: float = 5.0):
+    """Print periodic progress heartbeats while a long call is running."""
+    if not enabled:
+        yield
+        return
+
+    stop_event = threading.Event()
+    start = time.monotonic()
+
+    def _worker():
+        frames = "|/-\\"
+        idx = 0
+        while not stop_event.wait(interval_sec):
+            elapsed = int(time.monotonic() - start)
+            frame = frames[idx % len(frames)]
+            idx += 1
+            print(f"[atlas] {message} {frame} ({elapsed}s)", flush=True)
+
+    print(f"[atlas] {message} ...", flush=True)
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    try:
+        yield
+        elapsed = int(time.monotonic() - start)
+        print(f"[atlas] {message} done ({elapsed}s)", flush=True)
+    finally:
+        stop_event.set()
+        thread.join(timeout=interval_sec + 1.0)
+
+
+def _get_anndata_compat(
+    census_module,
+    census_handle,
+    *,
+    organism: str,
+    obs_value_filter: str,
+):
+    """Call census.get_anndata() across argument-name variants."""
+    try:
+        return census_module.get_anndata(
+            census_handle,
+            organism=organism,
+            obs_value_filter=obs_value_filter,
+            obs_column_names=[
+                "cell_type",
+                "tissue_general",
+                "dataset_id",
+                "assay",
+                "donor_id",
+            ],
+            var_column_names=["feature_name"],
+        )
+    except TypeError:
+        return census_module.get_anndata(
+            census_handle,
+            organism=organism,
+            obs_value_filter=obs_value_filter,
+            column_names={
+                "obs": [
+                    "cell_type",
+                    "tissue_general",
+                    "dataset_id",
+                    "assay",
+                    "donor_id",
+                ],
+                "var": ["feature_name"],
+            },
+        )
+
+
 def _tissue_dir(cache_dir: Path, organism: str, tissue: str) -> Path:
     """Return ``<cache_dir>/<organism>/<tissue>/``."""
     safe_tissue = tissue.replace(" ", "_")
@@ -290,6 +364,7 @@ def fetch_reference(
     max_cells_per_type: int = 2000,
     min_cell_types: int = 5,
     force: bool = False,
+    progress: bool = False,
 ) -> AtlasReference:
     """Download a tissue-specific scRNA-seq reference from CellxGENE Census.
 
@@ -311,6 +386,8 @@ def fetch_reference(
         Emit a warning if fewer unique cell types are found.
     force
         Re-download even if a cached reference exists.
+    progress
+        If True, print periodic progress heartbeats during long Census calls.
 
     Returns
     -------
@@ -324,6 +401,8 @@ def fetch_reference(
 
     # Use cache if present and not forcing
     if not force and h5ad.exists() and meta.exists():
+        if progress:
+            print(f"[atlas] Using cached reference: {h5ad}", flush=True)
         return _build_reference_from_metadata(meta)
 
     census = _require_census()
@@ -332,7 +411,10 @@ def fetch_reference(
     import anndata as _ad
     import numpy as np
 
-    with _open_census(census, census_version=census_version) as c:
+    with _progress_spinner("Opening CellxGENE Census", enabled=progress):
+        census_handle = _open_census(census, census_version=census_version)
+
+    with census_handle as c:
         # Value filter for Census query
         value_filter = (
             f"tissue_general == '{normalized}' "
@@ -340,20 +422,13 @@ def fetch_reference(
             f"and disease == 'normal'"
         )
 
-        adata: _ad.AnnData = census.get_anndata(
-            c,
-            organism=organism,
-            obs_value_filter=value_filter,
-            column_names={
-                "obs": [
-                    "cell_type",
-                    "tissue_general",
-                    "dataset_id",
-                    "assay",
-                    "donor_id",
-                ],
-            },
-        )
+        with _progress_spinner("Querying and downloading reference", enabled=progress):
+            adata: _ad.AnnData = _get_anndata_compat(
+                census,
+                c,
+                organism=organism,
+                obs_value_filter=value_filter,
+            )
 
     if adata.n_obs == 0:
         raise ValueError(
