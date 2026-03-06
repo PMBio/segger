@@ -1936,7 +1936,7 @@ def fetch(
         help="Maximum cells per cell type (stratified subsample).",
         validator=validators.Number(gt=0),
         group=group_atlas,
-    )] = 2000,
+    )] = 1000,
     force: Annotated[bool, Parameter(
         help="Re-download even if already cached.",
         group=group_atlas,

@@ -391,7 +391,7 @@ def fetch_reference(
     cache_dir: Path | None = None,
     organism: str = "homo_sapiens",
     census_version: str = "stable",
-    max_cells_per_type: int = 2000,
+    max_cells_per_type: int = 1000,
     min_cell_types: int = 5,
     force: bool = False,
     progress: bool = False,
