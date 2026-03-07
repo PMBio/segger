@@ -1,0 +1,1567 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Run the fixed-input Segger benchmark on LSF while preserving the current
+benchmark-script layout per dataset root.
+
+Environment overrides:
+  OUTPUT_ROOT                Top-level output root
+  DATASET_KEYS               "all" or comma-separated dataset keys
+  DRY_RUN                    1 to only render plans/scripts
+  AUTO_SUBMIT                1 to submit all LSF jobs immediately
+  RUN_EXPORTS                Legacy toggle for both export types
+  RUN_ANNDATA_EXPORT         1 to export AnnData outputs
+  RUN_XENIUM_EXPORT          1 to export Xenium Explorer outputs
+  SKIP_UNSUPPORTED_XENIUM_EXPORT
+                             1 to skip Xenium export when cells.zarr.zip is missing
+  RUN_VALIDATION_TABLE       1 to run the existing validation script per dataset
+  RUN_STATUS_SNAPSHOT        1 to run the existing dashboard per dataset
+  ENABLE_ALIGNMENT_JOBS      1 to include align_* training jobs (default: 1)
+  RESUME_IF_EXISTS           1 to skip jobs with complete outputs
+  RESET_DATASET_ROOT         1 to remove each dataset output dir before planning/submission
+  RUN_LABEL                  Optional run label embedded into LSF job names
+  SEGMENT_WALL_TIME_DEFAULT  Default wall time for segment/predict jobs
+  EXPORT_WALL_TIME_DEFAULT   Default wall time for export jobs
+  SEGGER_BIN                 Segger executable (default: segger)
+  CLUSTER_CODE_ROOT          Cluster checkout used inside LSF scripts
+  MAMBA_ACTIVATE_CMD         Optional shell snippet used inside LSF scripts
+  MICROMAMBA_BIN            Micromamba executable used inside LSF scripts
+  MICROMAMBA_ROOT_PREFIX     Micromamba root prefix used inside LSF scripts
+  SEGGER_ENV_PATH            Env path activated inside LSF scripts
+  PRESERVE_PYTHONPATH        1 to keep inherited PYTHONPATH inside LSF jobs
+  ALIGNMENT_REFERENCE_MODE   One of: auto|path|tissue (default: path)
+  ALIGNMENT_SCRNA_CELLTYPE_COLUMN
+                             Cell-type column in local scRNA refs (default: cell_type)
+  LSF_EXEC_SHELL             Shell used by LSF to interpret the job script
+  LSF_SUBMIT_HOST            Host used for remote bsub/bjobs (default: local)
+  SCRNA_REF_ROOT             Shared root that contains .segger_references
+  SCRNA_CACHE_DIR            Cache directory for h5ad refs
+  AUTO_FETCH_SCRNA_REFS      1 to use CELLXGENE_FETCH_CMD when refs are missing
+  CELLXGENE_FETCH_CMD        Command template: <cmd> <dataset_key> <dest_path>
+  POLL_INTERVAL_SEC          LSF poll interval
+  ROUTE_ELIGIBLE_TO_GPU      1 to route jobs that fit standard limits to GPU_QUEUE_DEFAULT
+  GPU_QUEUE_DEFAULT          Queue for standard GPU jobs (default: gpu)
+  GPU_QUEUE_PRO              Queue for high-memory GPU jobs (default: gpu-pro)
+  EXPORT_QUEUE               Queue for export jobs (default: GPU_QUEUE_DEFAULT)
+  ALIGNMENT_GPU_QUEUE        Optional override queue only for align_* jobs
+  GPU_QUEUE_MAX_GMEM         Max GPU memory (GB) for GPU_QUEUE_DEFAULT routing (default: 40)
+  GPU_QUEUE_MAX_MEM_GB       Max RAM (GB) for GPU_QUEUE_DEFAULT routing (default: 384)
+  PEND_FALLBACK_MIN          Minutes before moving standard jobs to gpu queue
+  MAX_ACTIVE_STANDARD        Reserved for future in-flight throttling
+  MAX_ACTIVE_FRAGMENT        Reserved for future in-flight throttling
+
+Usage:
+  bash scripts/run_lsf_segger_benchmark.sh
+EOF
+}
+
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S'
+}
+
+sanitize_tsv_field() {
+  local value="${1:-}"
+  value="${value//$'\t'/ }"
+  value="${value//$'\r'/ }"
+  value="${value//$'\n'/ }"
+  printf '%s' "${value}"
+}
+
+summary_header() {
+  printf "job\tgpu\tstatus\telapsed_s\tnote\tseg_dir\tlog_file\tsegment_status\texport_status\tsegment_job_id\texport_job_id\texport_note\n"
+}
+
+is_remote_submit_enabled() {
+  [[ -n "${LSF_SUBMIT_HOST:-}" ]]
+}
+
+normalize_bool() {
+  local value="${1:-}"
+  local lower
+  lower="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+  case "${lower}" in
+    1|true|t|yes|y|on) printf '1' ;;
+    0|false|f|no|n|off) printf '0' ;;
+    *)
+      echo "ERROR: Expected boolean value, got: ${value}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+normalize_alignment_reference_mode() {
+  local value="${1:-}"
+  local lower
+  lower="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+  case "${lower}" in
+    auto|path|tissue) printf '%s' "${lower}" ;;
+    *)
+      echo "ERROR: ALIGNMENT_REFERENCE_MODE must be one of: auto, path, tissue (got: ${value})." >&2
+      exit 1
+      ;;
+  esac
+}
+
+number_le() {
+  local a="${1:-0}"
+  local b="${2:-0}"
+  awk -v a="${a}" -v b="${b}" 'BEGIN { exit !((a + 0) <= (b + 0)) }'
+}
+
+shell_join() {
+  local out=""
+  local part
+  for part in "$@"; do
+    local quoted
+    printf -v quoted '%q' "${part}"
+    if [[ -n "${out}" ]]; then
+      out+=" "
+    fi
+    out+="${quoted}"
+  done
+  printf '%s' "${out}"
+}
+
+all_dataset_keys() {
+  cat <<'EOF'
+xenium_crc
+xenium_nsclc
+xenium_v1_colon
+xenium_mouse_liver
+xenium_v1_breast
+xenium_mouse_brain
+merscope_mouse_brain
+cosmx_human_pancreas
+EOF
+}
+
+is_known_dataset() {
+  case "${1:-}" in
+    xenium_crc|xenium_nsclc|xenium_v1_colon|xenium_mouse_liver|xenium_v1_breast|xenium_mouse_brain|merscope_mouse_brain|cosmx_human_pancreas)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+dataset_input_dir() {
+  case "${1:-}" in
+    xenium_crc) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_CRC_fixed" ;;
+    xenium_nsclc) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_nscls/xenium_fixed" ;;
+    xenium_v1_colon) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_v1_colon_fixed" ;;
+    xenium_mouse_liver) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_mouse_liver_fixed" ;;
+    xenium_v1_breast) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_v1_breast_fixed" ;;
+    xenium_mouse_brain) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_mouse_brain_fixed" ;;
+    merscope_mouse_brain) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/MERSCOPE_brain" ;;
+    cosmx_human_pancreas) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/CosMx_pancreas" ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+dataset_primary_ref() {
+  local cache_root="${SCRNA_REF_ROOT}"
+  if [[ "${cache_root}" != */.segger_references ]]; then
+    cache_root="${cache_root}/.segger_references"
+  fi
+  case "${1:-}" in
+    xenium_crc|xenium_v1_colon)
+      printf '%s' "${cache_root}/homo_sapiens/large_intestine/large_intestine.h5ad"
+      ;;
+    xenium_nsclc)
+      printf '%s' "${cache_root}/homo_sapiens/lung/lung.h5ad"
+      ;;
+    xenium_mouse_liver)
+      printf '%s' "${cache_root}/mus_musculus/liver/liver.h5ad"
+      ;;
+    xenium_v1_breast)
+      printf '%s' "${cache_root}/homo_sapiens/breast/breast.h5ad"
+      ;;
+    xenium_mouse_brain|merscope_mouse_brain)
+      printf '%s' "${cache_root}/mus_musculus/brain/brain.h5ad"
+      ;;
+    cosmx_human_pancreas)
+      printf '%s' "${cache_root}/homo_sapiens/pancreas/pancreas.h5ad"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+dataset_fallback_ref() {
+  case "${1:-}" in
+    xenium_crc|xenium_v1_colon)
+      printf '%s' "${SCRNA_REF_ROOT}/human_crc.h5ad"
+      ;;
+    xenium_nsclc)
+      printf '%s' "${SCRNA_REF_ROOT}/lung_cancer.h5ad"
+      ;;
+    xenium_mouse_liver)
+      printf '%s' "${SCRNA_REF_ROOT}/mouse_liver_cellxgene_a34c8af2.h5ad"
+      ;;
+    xenium_v1_breast)
+      printf '%s' "${SCRNA_REF_ROOT}/breast_cancer_annotated.h5ad"
+      ;;
+    xenium_mouse_brain|merscope_mouse_brain)
+      printf '%s' "${SCRNA_REF_ROOT}/mouse_brain.h5ad"
+      ;;
+    cosmx_human_pancreas)
+      printf '%s' "${SCRNA_REF_ROOT}/human_pancreas_cellxgene_e51bae9a.h5ad"
+      ;;
+    *)
+      printf '%s' ""
+      ;;
+  esac
+}
+
+dataset_tissue_type() {
+  case "${1:-}" in
+    xenium_crc|xenium_v1_colon) printf '%s' "large_intestine" ;;
+    xenium_nsclc) printf '%s' "lung" ;;
+    xenium_mouse_liver) printf '%s' "liver" ;;
+    xenium_v1_breast) printf '%s' "breast" ;;
+    xenium_mouse_brain|merscope_mouse_brain) printf '%s' "brain" ;;
+    cosmx_human_pancreas) printf '%s' "pancreas" ;;
+    *)
+      printf '%s' ""
+      ;;
+  esac
+}
+
+alignment_reference_args() {
+  local tissue_type="$1"
+  local scrna_ref="$2"
+  local mode="$3"
+  local cache_args=""
+  local ref_args=""
+
+  if [[ -n "${SCRNA_CACHE_DIR}" ]]; then
+    cache_args=" $(shell_join --reference-cache-dir "${SCRNA_CACHE_DIR}")"
+  fi
+
+  case "${mode}" in
+    path)
+      if [[ -n "${scrna_ref}" ]]; then
+        ref_args="$(shell_join --scrna-reference-path "${scrna_ref}" --scrna-celltype-column "${ALIGNMENT_SCRNA_CELLTYPE_COLUMN}")"
+      fi
+      ;;
+    tissue)
+      if [[ -n "${tissue_type}" ]]; then
+        ref_args="$(shell_join --tissue-type "${tissue_type}")${cache_args}"
+      elif [[ -n "${scrna_ref}" ]]; then
+        ref_args="$(shell_join --scrna-reference-path "${scrna_ref}" --scrna-celltype-column "${ALIGNMENT_SCRNA_CELLTYPE_COLUMN}")"
+      fi
+      ;;
+    auto)
+      if [[ -n "${scrna_ref}" && -f "${scrna_ref}" ]]; then
+        ref_args="$(shell_join --scrna-reference-path "${scrna_ref}" --scrna-celltype-column "${ALIGNMENT_SCRNA_CELLTYPE_COLUMN}")"
+      elif [[ -n "${tissue_type}" ]]; then
+        ref_args="$(shell_join --tissue-type "${tissue_type}")${cache_args}"
+      fi
+      ;;
+  esac
+
+  printf '%s' "${ref_args}"
+}
+
+job_specs() {
+  cat <<'EOF'
+baseline|A|segment|false|2.2|5|20|2|4|5|0|false|0.0|2.2|false
+use3d_true|A|segment|true|2.2|5|20|2|4|5|0|false|0.0|2.2|false
+pred_sf1p2_fragoff|A|predict|checkpoint|1.2|5|20|2|4|5|0|false|0.0|1.2|false
+pred_sf1p2_fragon|B|predict|checkpoint|1.2|5|20|2|4|5|0|false|0.0|1.2|true
+pred_sf2p2_fragoff|A|predict|checkpoint|2.2|5|20|2|4|5|0|false|0.0|2.2|false
+pred_sf2p2_fragon|B|predict|checkpoint|2.2|5|20|2|4|5|0|false|0.0|2.2|true
+pred_sf3p2_fragoff|A|predict|checkpoint|3.2|5|20|2|4|5|0|false|0.0|3.2|false
+pred_sf3p2_fragon|B|predict|checkpoint|3.2|5|20|2|4|5|0|false|0.0|3.2|true
+EOF
+  if [[ "${ENABLE_ALIGNMENT_JOBS}" == "1" ]]; then
+    cat <<'EOF'
+align_0p01|A|segment|false|2.2|5|20|2|4|5|0|true|0.01|2.2|false
+align_0p03|A|segment|false|2.2|5|20|2|4|5|0|true|0.03|2.2|false
+align_0p10|A|segment|false|2.2|5|20|2|4|5|0|true|0.1|2.2|false
+EOF
+  fi
+}
+
+job_lane() {
+  case "${1:-}" in
+    A) printf '0' ;;
+    B) printf '1' ;;
+    *) printf '-' ;;
+  esac
+}
+
+summary_file_for_group() {
+  local dataset_root="$1"
+  local group="$2"
+  printf '%s' "${dataset_root}/summaries/gpu$(job_lane "${group}").tsv"
+}
+
+canonical_log_for_job() {
+  local dataset_root="$1"
+  local job="$2"
+  local group="$3"
+  printf '%s' "${dataset_root}/logs/${job}.gpu$(job_lane "${group}").log"
+}
+
+init_status_file() {
+  local file_path="$1"
+  mkdir -p "$(dirname "${file_path}")"
+  summary_header > "${file_path}"
+}
+
+init_dataset_root() {
+  local dataset_root="$1"
+  mkdir -p \
+    "${dataset_root}/runs" \
+    "${dataset_root}/exports" \
+    "${dataset_root}/logs" \
+    "${dataset_root}/summaries" \
+    "${dataset_root}/bsub"
+  init_status_file "${dataset_root}/summaries/gpu0.tsv"
+  init_status_file "${dataset_root}/summaries/gpu1.tsv"
+  init_status_file "${dataset_root}/summaries/recovery.tsv"
+  init_status_file "${dataset_root}/summaries/skipped_existing.tsv"
+  init_status_file "${dataset_root}/summaries/all_jobs.tsv"
+}
+
+write_dataset_context() {
+  local dataset_root="$1"
+  local dataset="$2"
+  local input_dir="$3"
+  local scrna_ref="$4"
+  local tissue_type="$5"
+  local context_file="${dataset_root}/dataset_context.env"
+  printf "DATASET_KEY=%q\n" "${dataset}" > "${context_file}"
+  printf "INPUT_DIR=%q\n" "${input_dir}" >> "${context_file}"
+  printf "SCRNA_REFERENCE_PATH=%q\n" "${scrna_ref}" >> "${context_file}"
+  printf "TISSUE_TYPE=%q\n" "${tissue_type}" >> "${context_file}"
+  printf "SEGGER_BIN=%q\n" "${SEGGER_BIN}" >> "${context_file}"
+}
+
+upsert_status_row() {
+  local file_path="$1"
+  local job="$2"
+  local gpu="$3"
+  local status="$4"
+  local elapsed_s="$5"
+  local note="$6"
+  local seg_dir="$7"
+  local log_file="$8"
+  local segment_status="${9:-}"
+  local export_status="${10:-}"
+  local segment_job_id="${11:-}"
+  local export_job_id="${12:-}"
+  local export_note="${13:-}"
+  local tmp_file
+  local note_clean
+  local export_note_clean
+
+  note_clean="$(sanitize_tsv_field "${note}")"
+  export_note_clean="$(sanitize_tsv_field "${export_note}")"
+  tmp_file="$(mktemp)"
+  {
+    head -n1 "${file_path}" 2>/dev/null || summary_header
+    tail -n +2 "${file_path}" 2>/dev/null | awk -F'\t' -v target="${job}" '$1 != target'
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+      "${job}" "${gpu}" "${status}" "${elapsed_s}" "${note_clean}" "${seg_dir}" "${log_file}" \
+      "${segment_status}" "${export_status}" "${segment_job_id}" "${export_job_id}" "${export_note_clean}"
+  } > "${tmp_file}"
+  mv "${tmp_file}" "${file_path}"
+}
+
+rebuild_all_jobs_summary() {
+  local dataset_root="$1"
+  local out_file="${dataset_root}/summaries/all_jobs.tsv"
+  awk 'FNR == 1 && NR != 1 { next } { print }' \
+    "${dataset_root}/summaries/gpu0.tsv" \
+    "${dataset_root}/summaries/gpu1.tsv" \
+    "${dataset_root}/summaries/skipped_existing.tsv" \
+    "${dataset_root}/summaries/recovery.tsv" \
+    > "${out_file}"
+}
+
+append_canonical_log() {
+  local dataset_root="$1"
+  local job="$2"
+  local group="$3"
+  local message="$4"
+  local log_file
+  log_file="$(canonical_log_for_job "${dataset_root}" "${job}" "${group}")"
+  mkdir -p "$(dirname "${log_file}")"
+  printf "[%s] %s\n" "$(timestamp)" "${message}" >> "${log_file}"
+}
+
+announce_job_event() {
+  local level="$1"
+  local dataset="$2"
+  local job="$3"
+  local message="$4"
+  if [[ "${level}" == "ERROR" ]]; then
+    printf "[%s] %s dataset=%s job=%s %s\n" "$(timestamp)" "${level}" "${dataset}" "${job}" "${message}" >&2
+  else
+    printf "[%s] %s dataset=%s job=%s %s\n" "$(timestamp)" "${level}" "${dataset}" "${job}" "${message}"
+  fi
+}
+
+write_dataset_plan() {
+  local dataset_root="$1"
+  local plan_file="${dataset_root}/job_plan.tsv"
+  local line
+
+  printf "job\tgroup\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\n" > "${plan_file}"
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    IFS='|' read -r \
+      job group _mode use_3d expansion txk txdist layers heads cellsmin minqv alignment _align_weight _pred_scale _fragment \
+      <<< "${line}"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+      "${job}" "${group}" "${use_3d}" "${expansion}" "${txk}" "${txdist}" "${layers}" "${heads}" "${cellsmin}" "${minqv}" "${alignment}" \
+      >> "${plan_file}"
+    : > "$(canonical_log_for_job "${dataset_root}" "${job}" "${group}")"
+  done <<EOF
+$(job_specs)
+EOF
+}
+
+resolve_requested_datasets() {
+  local token
+  local old_ifs
+  if [[ "${DATASET_KEYS}" == "all" ]]; then
+    all_dataset_keys
+    return 0
+  fi
+
+  old_ifs="${IFS}"
+  IFS=','
+  set -- ${DATASET_KEYS}
+  IFS="${old_ifs}"
+  for token in "$@"; do
+    token="$(printf '%s' "${token}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ -z "${token}" ]] && continue
+    if ! is_known_dataset "${token}"; then
+      echo "ERROR: Unknown dataset key: ${token}" >&2
+      exit 1
+    fi
+    printf '%s\n' "${token}"
+  done
+}
+
+resolve_scrna_reference() {
+  local dataset="$1"
+  local primary
+  local fallback
+
+  primary="$(dataset_primary_ref "${dataset}")"
+  fallback="$(dataset_fallback_ref "${dataset}")"
+  if [[ -n "${primary}" && -f "${primary}" ]]; then
+    printf '%s' "${primary}"
+    return 0
+  fi
+  if [[ -n "${fallback}" && -f "${fallback}" ]]; then
+    printf '%s' "${fallback}"
+    return 0
+  fi
+  if [[ -n "${primary}" ]]; then
+    printf '%s' "${primary}"
+    return 0
+  fi
+  if [[ -n "${fallback}" ]]; then
+    printf '%s' "${fallback}"
+    return 0
+  fi
+
+  printf '%s' ""
+}
+
+ensure_alignment_reference_ready() {
+  local dataset="$1"
+  local scrna_ref="$2"
+  local tissue_type="$3"
+
+  [[ "${ENABLE_ALIGNMENT_JOBS}" == "1" ]] || return 0
+
+  case "${ALIGNMENT_REFERENCE_MODE}" in
+    path)
+      if [[ -z "${scrna_ref}" ]]; then
+        echo "ERROR: dataset=${dataset} requires a local scRNA reference in ALIGNMENT_REFERENCE_MODE=path, but none is configured." >&2
+        return 1
+      fi
+      if [[ ! -f "${scrna_ref}" ]]; then
+        echo "ERROR: dataset=${dataset} local scRNA reference not found: ${scrna_ref}" >&2
+        return 1
+      fi
+      ;;
+    auto)
+      if [[ -n "${scrna_ref}" && ! -f "${scrna_ref}" ]]; then
+        printf "[%s] WARN dataset=%s local scRNA reference missing (%s); auto mode may fall back to --tissue-type=%s\n" \
+          "$(timestamp)" "${dataset}" "${scrna_ref}" "${tissue_type:-<none>}" >&2
+      fi
+      ;;
+  esac
+}
+
+job_exports_requested() {
+  [[ "${RUN_ANNDATA_EXPORT}" == "1" || "${RUN_XENIUM_EXPORT}" == "1" ]]
+}
+
+xenium_export_supported_for_input() {
+  local input_dir="$1"
+  [[ -f "${input_dir}/cells.zarr.zip" ]]
+}
+
+dataset_segment_mem_gb() {
+  case "${1:-}" in
+    xenium_mouse_brain) printf '512' ;;
+    xenium_nsclc|xenium_mouse_liver) printf '256' ;;
+    xenium_crc|xenium_v1_colon) printf '192' ;;
+    *) printf '128' ;;
+  esac
+}
+
+dataset_segment_gmem() {
+  case "${1:-}" in
+    xenium_mouse_brain) printf '40' ;;
+    *) printf '30' ;;
+  esac
+}
+
+dataset_segment_wall_time() {
+  case "${1:-}" in
+    xenium_mouse_brain) printf '12:00' ;;
+    xenium_nsclc|xenium_mouse_liver) printf '10:00' ;;
+    *) printf '%s' "${SEGMENT_WALL_TIME_DEFAULT}" ;;
+  esac
+}
+
+dataset_predict_mem_gb() {
+  local dataset="$1"
+  local fragment="$2"
+  if [[ "${fragment}" == "true" ]]; then
+    case "${dataset}" in
+      xenium_mouse_brain) printf '512' ;;
+      *) printf '256' ;;
+    esac
+  else
+    case "${dataset}" in
+      xenium_nsclc|xenium_mouse_liver|xenium_crc|xenium_v1_colon) printf '192' ;;
+      *) printf '128' ;;
+    esac
+  fi
+}
+
+dataset_predict_gmem() {
+  local fragment="$1"
+  if [[ "${fragment}" == "true" ]]; then
+    printf '60'
+  else
+    printf '30'
+  fi
+}
+
+dataset_predict_wall_time() {
+  local dataset="$1"
+  local fragment="$2"
+  if [[ "${fragment}" == "true" ]]; then
+    case "${dataset}" in
+      xenium_mouse_brain) printf '16:00' ;;
+      xenium_nsclc|xenium_mouse_liver|xenium_crc|xenium_v1_colon) printf '12:00' ;;
+      *) printf '10:00' ;;
+    esac
+    return 0
+  fi
+  case "${dataset}" in
+    xenium_mouse_brain) printf '12:00' ;;
+    xenium_nsclc|xenium_mouse_liver) printf '10:00' ;;
+    *) printf '%s' "${SEGMENT_WALL_TIME_DEFAULT}" ;;
+  esac
+}
+
+dataset_tiling_margin_training() {
+  case "${1:-}" in
+    xenium_mouse_brain) printf '4' ;;
+    xenium_v1_breast) printf '6' ;;
+    *) printf '8' ;;
+  esac
+}
+
+dataset_tiling_margin_prediction() {
+  case "${1:-}" in
+    xenium_mouse_brain) printf '4' ;;
+    xenium_v1_breast) printf '6' ;;
+    *) printf '8' ;;
+  esac
+}
+
+resolve_primary_resources() {
+  local dataset="$1"
+  local mode="$2"
+  local fragment="$3"
+  local alignment="${4:-false}"
+  local queue_name="${GPU_QUEUE_PRO}"
+  local gmem=""
+  local mem_gb=""
+  local wall_time=""
+
+  if [[ "${mode}" == "segment" ]]; then
+    gmem="$(dataset_segment_gmem "${dataset}")"
+    mem_gb="$(dataset_segment_mem_gb "${dataset}")"
+    wall_time="$(dataset_segment_wall_time "${dataset}")"
+  else
+    gmem="$(dataset_predict_gmem "${fragment}")"
+    mem_gb="$(dataset_predict_mem_gb "${dataset}" "${fragment}")"
+    wall_time="$(dataset_predict_wall_time "${dataset}" "${fragment}")"
+  fi
+
+  if [[ "${ROUTE_ELIGIBLE_TO_GPU}" == "1" ]]; then
+    if number_le "${gmem}" "${GPU_QUEUE_MAX_GMEM}" && number_le "${mem_gb}" "${GPU_QUEUE_MAX_MEM_GB}"; then
+      queue_name="${GPU_QUEUE_DEFAULT}"
+    fi
+  fi
+
+  if [[ -n "${ALIGNMENT_GPU_QUEUE}" && "${alignment}" == "true" ]]; then
+    queue_name="${ALIGNMENT_GPU_QUEUE}"
+  fi
+
+  printf "%s\t%s\t%s\t%s\n" "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}"
+}
+
+resolve_export_resources() {
+  printf "%s\t128\t%s\n" "${EXPORT_QUEUE}" "${EXPORT_WALL_TIME_DEFAULT}"
+}
+
+primary_success_status() {
+  local mode="$1"
+  if [[ "${mode}" == "predict" ]]; then
+    printf 'predict_ok'
+  else
+    printf 'segment_ok'
+  fi
+}
+
+classify_primary_exit_status() {
+  local mode="$1"
+  local exit_code="$2"
+  local prefix="segment"
+  if [[ "${mode}" == "predict" ]]; then
+    prefix="predict"
+  fi
+  case "${exit_code}" in
+    137|140) printf '%s_oom' "${prefix}" ;;
+    138|143) printf '%s_runlimit' "${prefix}" ;;
+    *) printf '%s_error' "${prefix}" ;;
+  esac
+}
+
+job_complete() {
+  local dataset_root="$1"
+  local job="$2"
+  local seg_dir="${dataset_root}/runs/${job}"
+  local seg_file="${seg_dir}/segger_segmentation.parquet"
+  local transcripts_file="${seg_dir}/transcripts.parquet"
+  local anndata_file="${dataset_root}/exports/${job}/anndata/segger_segmentation.h5ad"
+  local xenium_file="${dataset_root}/exports/${job}/xenium_explorer/seg_experiment.xenium"
+
+  if [[ -f "${seg_file}" || -f "${transcripts_file}" ]]; then
+    return 0
+  fi
+  if [[ -f "${anndata_file}" && -f "${xenium_file}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+render_primary_attempt_script() {
+  local dataset_root="$1"
+  local dataset="$2"
+  local input_dir="$3"
+  local scrna_ref="$4"
+  local tissue_type="$5"
+  local job="$6"
+  local group="$7"
+  local mode="$8"
+  local use_3d="$9"
+  local expansion="${10}"
+  local txk="${11}"
+  local txdist="${12}"
+  local layers="${13}"
+  local heads="${14}"
+  local cellsmin="${15}"
+  local minqv="${16}"
+  local alignment="${17}"
+  local align_weight="${18}"
+  local pred_scale="${19}"
+  local fragment="${20}"
+  local attempt="${21}"
+  local queue_name="${22}"
+  local gmem="${23}"
+  local mem_gb="${24}"
+  local wall_time="${25}"
+
+  local seg_dir="${dataset_root}/runs/${job}"
+  local seg_file="${seg_dir}/segger_segmentation.parquet"
+  local baseline_ckpt="${dataset_root}/runs/baseline/checkpoints/last.ckpt"
+  local segment_status_file="${seg_dir}/.segment_status"
+  local out_log="${dataset_root}/logs/${job}.attempt${attempt}.out"
+  local err_log="${dataset_root}/logs/${job}.attempt${attempt}.err"
+  local script_path="${dataset_root}/bsub/${job}.attempt${attempt}.sh"
+  local lsf_name="segger_${dataset}_${job}_${RUN_LABEL}_a${attempt}"
+  local success_status
+  local failure_prefix="segment"
+  local segger_cmd_line=""
+  local align_ref_args=""
+  local dependency_directive=""
+  local activation_block=":"
+  local tiling_margin_training=""
+  local tiling_margin_prediction=""
+
+  success_status="$(primary_success_status "${mode}")"
+  if [[ "${mode}" == "predict" ]]; then
+    failure_prefix="predict"
+  fi
+
+  tiling_margin_training="$(dataset_tiling_margin_training "${dataset}")"
+  tiling_margin_prediction="$(dataset_tiling_margin_prediction "${dataset}")"
+
+  if [[ "${mode}" == "segment" ]]; then
+    segger_cmd_line="$(shell_join \
+      "${SEGGER_BIN}" segment \
+      "${input_dir}" \
+      "${seg_dir}" \
+      --n-epochs "${N_EPOCHS}" \
+      --prediction-mode nucleus \
+      --prediction-scale-factor "${pred_scale}" \
+      --use-3d "${use_3d}" \
+      --transcripts-max-k "${txk}" \
+      --transcripts-max-dist "${txdist}" \
+      --tiling-margin-training "${tiling_margin_training}" \
+      --tiling-margin-prediction "${tiling_margin_prediction}" \
+      --n-mid-layers "${layers}" \
+      --n-heads "${heads}" \
+      --cells-min-counts "${cellsmin}" \
+      --min-qv "${minqv}")"
+    if [[ "${alignment}" == "true" ]]; then
+      align_ref_args="$(alignment_reference_args "${tissue_type}" "${scrna_ref}" "${ALIGNMENT_REFERENCE_MODE}")"
+      segger_cmd_line+=" $(shell_join \
+        --alignment-loss \
+        --alignment-loss-weight-start 0.0 \
+        --alignment-loss-weight-end "${align_weight}")"
+      if [[ -n "${align_ref_args}" ]]; then
+        segger_cmd_line+=" ${align_ref_args}"
+      fi
+    fi
+  else
+    dependency_directive="#BSUB -w \"done(segger_${dataset}_baseline_${RUN_LABEL}_a${attempt})\""
+    segger_cmd_line="$(shell_join \
+      "${SEGGER_BIN}" predict \
+      -c "${baseline_ckpt}" \
+      -i "${input_dir}" \
+      -o "${seg_dir}" \
+      --prediction-scale-factor "${pred_scale}" \
+      --use-3d checkpoint)"
+    if [[ "${fragment}" == "true" ]]; then
+      segger_cmd_line+=" $(shell_join --fragment-mode)"
+    fi
+  fi
+
+  if [[ -n "${MAMBA_ACTIVATE_CMD}" ]]; then
+    activation_block=$'set +u\n'"${MAMBA_ACTIVATE_CMD}"$'\nset -u'
+  fi
+
+  cat > "${script_path}" <<EOF
+#!/usr/bin/env bash
+#BSUB -J ${lsf_name}
+#BSUB -o ${out_log}
+#BSUB -e ${err_log}
+#BSUB -L ${LSF_EXEC_SHELL}
+#BSUB -q ${queue_name}
+#BSUB -W ${wall_time}
+#BSUB -n 8
+#BSUB -R "rusage[mem=${mem_gb}G]"
+#BSUB -M ${mem_gb}G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=${gmem}G"
+${dependency_directive}
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="\$1"
+  local stage_rc="\${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "\${stage_status}" "\${stage_rc}" > $(printf '%q' "${segment_status_file}")
+}
+
+classify_segment_status() {
+  local stage_rc="\$1"
+  case "\${stage_rc}" in
+    137|140) printf '%s_oom' $(printf '%q' "${failure_prefix}") ;;
+    138|143) printf '%s_runlimit' $(printf '%q' "${failure_prefix}") ;;
+    *) printf '%s_error' $(printf '%q' "${failure_prefix}") ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=\$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f $(printf '%q' "${segment_status_file}") ]]; then
+    current_status="\$(awk -F'=' '\$1 == \"segment_status\" { print \$2; exit }' $(printf '%q' "${segment_status_file}") 2>/dev/null || true)"
+  fi
+  if [[ "\${rc}" -ne 0 ]] && [[ "\${current_status}" != $(printf '%q' "${success_status}") ]]; then
+    write_segment_status "\$(classify_segment_status "\${rc}")" "\${rc}"
+  elif [[ -z "\${current_status}" ]]; then
+    write_segment_status "pending" "\${rc}"
+  fi
+  exit "\${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd $(printf '%q' "${CLUSTER_CODE_ROOT}")
+${activation_block}
+
+echo "[JOB] dataset=${dataset} job=${job} attempt=${attempt}"
+echo "[JOB] queue=${queue_name} gmem=${gmem}G mem=${mem_gb}G wall=${wall_time}"
+hostname || true
+date || true
+nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits || true
+
+mkdir -p $(printf '%q' "${seg_dir}")
+write_segment_status "running" "0"
+$(printf '%s' "${segger_cmd_line}")
+segger_rc=\$?
+echo "[JOB] segger_rc=\${segger_rc}"
+if [[ "\${segger_rc}" -ne 0 ]]; then
+  write_segment_status "\$(classify_segment_status "\${segger_rc}")" "\${segger_rc}"
+  exit "\${segger_rc}"
+fi
+
+if [[ -f $(printf '%q' "${seg_file}") ]]; then
+  ln -sfn segger_segmentation.parquet $(printf '%q' "${seg_dir}/transcripts.parquet")
+fi
+
+write_segment_status $(printf '%q' "${success_status}") "0"
+echo "[JOB] completed"
+exit 0
+EOF
+
+  chmod +x "${script_path}"
+  printf '%s' "${script_path}"
+}
+
+render_export_attempt_script() {
+  local dataset_root="$1"
+  local dataset="$2"
+  local input_dir="$3"
+  local job="$4"
+  local attempt="$5"
+  local queue_name="$6"
+  local mem_gb="$7"
+  local wall_time="$8"
+
+  local seg_dir="${dataset_root}/runs/${job}"
+  local seg_file="${seg_dir}/segger_segmentation.parquet"
+  local anndata_dir="${dataset_root}/exports/${job}/anndata"
+  local xenium_dir="${dataset_root}/exports/${job}/xenium_explorer"
+  local export_status_file="${seg_dir}/.export_status"
+  local out_log="${dataset_root}/logs/${job}.export.attempt${attempt}.out"
+  local err_log="${dataset_root}/logs/${job}.export.attempt${attempt}.err"
+  local script_path="${dataset_root}/bsub/${job}.export.attempt${attempt}.sh"
+  local lsf_name="segger_${dataset}_${job}_${RUN_LABEL}_a${attempt}_export"
+  local dependency_directive="#BSUB -w \"done(segger_${dataset}_${job}_${RUN_LABEL}_a${attempt})\""
+  local activation_block=":"
+  local xenium_supported="0"
+  local export_anndata_cmd=""
+  local export_xenium_cmd=""
+
+  if xenium_export_supported_for_input "${input_dir}"; then
+    xenium_supported="1"
+  fi
+
+  export_anndata_cmd="$(shell_join \
+    "${SEGGER_BIN}" export \
+    -s "${seg_file}" \
+    -i "${input_dir}" \
+    -o "${anndata_dir}" \
+    --format anndata)"
+  export_xenium_cmd="$(shell_join \
+    "${SEGGER_BIN}" export \
+    -s "${seg_file}" \
+    -i "${input_dir}" \
+    -o "${xenium_dir}" \
+    --format xenium_explorer \
+    --boundary-method convex_hull \
+    --boundary-voxel-size 5 \
+    --num-workers 8)"
+
+  if [[ -n "${MAMBA_ACTIVATE_CMD}" ]]; then
+    activation_block=$'set +u\n'"${MAMBA_ACTIVATE_CMD}"$'\nset -u'
+  fi
+
+  cat > "${script_path}" <<EOF
+#!/usr/bin/env bash
+#BSUB -J ${lsf_name}
+#BSUB -o ${out_log}
+#BSUB -e ${err_log}
+#BSUB -L ${LSF_EXEC_SHELL}
+#BSUB -q ${queue_name}
+#BSUB -W ${wall_time}
+#BSUB -n 4
+#BSUB -R "rusage[mem=${mem_gb}G]"
+#BSUB -M ${mem_gb}G
+${dependency_directive}
+
+set -euo pipefail
+
+write_export_status() {
+  local stage_status="\$1"
+  local stage_rc="\${2:-0}"
+  local anndata_rc="\${3:-0}"
+  local xenium_rc="\${4:-0}"
+  local export_note="\${5:-}"
+  printf 'export_status=%s\nexport_rc=%s\nanndata_rc=%s\nxenium_rc=%s\nexport_note=%s\n' \
+    "\${stage_status}" "\${stage_rc}" "\${anndata_rc}" "\${xenium_rc}" "\${export_note}" \
+    > $(printf '%q' "${export_status_file}")
+}
+
+on_export_exit() {
+  local rc=\$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f $(printf '%q' "${export_status_file}") ]]; then
+    current_status="\$(awk -F'=' '\$1 == \"export_status\" { print \$2; exit }' $(printf '%q' "${export_status_file}") 2>/dev/null || true)"
+  fi
+  if [[ "\${rc}" -ne 0 ]] && [[ "\${current_status}" != "export_ok" ]] && [[ "\${current_status}" != "export_skipped_xenium_missing_source" ]]; then
+    write_export_status "export_error" "\${rc}" "0" "0" ""
+  elif [[ -z "\${current_status}" ]]; then
+    write_export_status "pending" "\${rc}" "0" "0" ""
+  fi
+  exit "\${rc}"
+}
+
+trap on_export_exit EXIT INT TERM HUP
+
+cd $(printf '%q' "${CLUSTER_CODE_ROOT}")
+${activation_block}
+
+echo "[JOB] dataset=${dataset} job=${job} export attempt=${attempt}"
+echo "[JOB] queue=${queue_name} mem=${mem_gb}G wall=${wall_time}"
+hostname || true
+date || true
+
+if [[ $(printf '%q' "${RUN_ANNDATA_EXPORT}") != "1" && $(printf '%q' "${RUN_XENIUM_EXPORT}") != "1" ]]; then
+  write_export_status "not_requested" "0" "0" "0" ""
+  echo "[JOB] export disabled"
+  exit 0
+fi
+
+if [[ ! -f $(printf '%q' "${seg_file}") ]]; then
+  write_export_status "export_error" "1" "0" "0" "missing_segmentation"
+  echo "[JOB] export missing segmentation input"
+  exit 1
+fi
+
+mkdir -p $(printf '%q' "${anndata_dir}") $(printf '%q' "${xenium_dir}")
+write_export_status "running" "0" "0" "0" ""
+
+anndata_rc=0
+xenium_rc=0
+overall_rc=0
+final_status="export_ok"
+export_note=""
+
+if [[ $(printf '%q' "${RUN_ANNDATA_EXPORT}") == "1" ]]; then
+  ${export_anndata_cmd} || anndata_rc=\$?
+fi
+
+if [[ $(printf '%q' "${RUN_XENIUM_EXPORT}") == "1" ]]; then
+  if [[ $(printf '%q' "${xenium_supported}") == "1" ]]; then
+    ${export_xenium_cmd} || xenium_rc=\$?
+  elif [[ $(printf '%q' "${SKIP_UNSUPPORTED_XENIUM_EXPORT}") == "1" ]]; then
+    export_note="xenium_missing_source"
+    final_status="export_skipped_xenium_missing_source"
+  else
+    xenium_rc=1
+    export_note="xenium_missing_source_required"
+  fi
+fi
+
+if [[ "\${anndata_rc}" -ne 0 ]]; then
+  overall_rc="\${anndata_rc}"
+  final_status="export_error"
+elif [[ "\${xenium_rc}" -ne 0 ]]; then
+  overall_rc="\${xenium_rc}"
+  final_status="export_error"
+fi
+
+write_export_status "\${final_status}" "\${overall_rc}" "\${anndata_rc}" "\${xenium_rc}" "\${export_note}"
+echo "[JOB] export_status=\${final_status} export_rc=\${overall_rc}"
+if [[ "\${overall_rc}" -ne 0 ]]; then
+  exit "\${overall_rc}"
+fi
+echo "[JOB] completed"
+exit 0
+EOF
+
+  chmod +x "${script_path}"
+  printf '%s' "${script_path}"
+}
+
+status_note() {
+  local queue_name="$1"
+  local gmem="$2"
+  local attempt="$3"
+  local job_id="$4"
+  local suffix="${5:-}"
+  local note
+  note="queue=${queue_name} gmem=${gmem}G attempt=${attempt}"
+  if [[ -n "${job_id}" ]]; then
+    note+=" lsf_job=${job_id}"
+  fi
+  if [[ -n "${suffix}" ]]; then
+    note+=" ${suffix}"
+  fi
+  printf '%s' "${note}"
+}
+
+next_attempt_for_job() {
+  local dataset_root="$1"
+  local job="$2"
+  local best=0
+  local f num
+  for f in \
+    "${dataset_root}/logs/${job}.attempt"*.out \
+    "${dataset_root}/logs/${job}.attempt"*.err \
+    "${dataset_root}/bsub/${job}.attempt"*.sh \
+    "${dataset_root}/bsub/${job}.export.attempt"*.sh; do
+    [[ -f "${f}" ]] || continue
+    num="$(printf '%s\n' "$(basename "${f}")" | sed -n 's/.*\.attempt\([0-9][0-9]*\)\..*/\1/p')"
+    [[ -n "${num}" ]] || continue
+    if [[ "${num}" -gt "${best}" ]]; then
+      best="${num}"
+    fi
+  done
+  printf '%s' "$((best + 1))"
+}
+
+contains_pattern() {
+  local file_path="$1"
+  local pattern="$2"
+  [[ -f "${file_path}" ]] || return 1
+  if command -v rg >/dev/null 2>&1; then
+    rg -qi "${pattern}" "${file_path}"
+  else
+    grep -Eiq "${pattern}" "${file_path}"
+  fi
+}
+
+diagnostics_for_job() {
+  local job_id="$1"
+  local tmp_file="$2"
+  : > "${tmp_file}"
+  if is_remote_submit_enabled; then
+    ssh -o BatchMode=yes "${LSF_SUBMIT_HOST}" bjobs -l "${job_id}" >> "${tmp_file}" 2>/dev/null || true
+  elif command -v bjobs >/dev/null 2>&1; then
+    bjobs -l "${job_id}" >> "${tmp_file}" 2>/dev/null || true
+  fi
+  if is_remote_submit_enabled; then
+    ssh -o BatchMode=yes "${LSF_SUBMIT_HOST}" bacct -l "${job_id}" >> "${tmp_file}" 2>/dev/null || true
+  elif command -v bacct >/dev/null 2>&1; then
+    bacct -l "${job_id}" >> "${tmp_file}" 2>/dev/null || true
+  fi
+}
+
+classify_failure() {
+  local job="$1"
+  local attempt="$2"
+  local dataset_root="$3"
+  local mode="$4"
+  local job_id="$5"
+  local diag_file
+  local out_log="${dataset_root}/logs/${job}.attempt${attempt}.out"
+  local err_log="${dataset_root}/logs/${job}.attempt${attempt}.err"
+
+  diag_file="$(mktemp)"
+  diagnostics_for_job "${job_id}" "${diag_file}"
+
+  if contains_pattern "${diag_file}" 'TERM_MEMLIMIT' || \
+     contains_pattern "${out_log}" 'TERM_MEMLIMIT|out of memory|cuda error: out of memory|cublas status alloc failed' || \
+     contains_pattern "${err_log}" 'TERM_MEMLIMIT|out of memory|cuda error: out of memory|cublas status alloc failed'; then
+    rm -f "${diag_file}"
+    printf 'oom'
+    return 0
+  fi
+  if contains_pattern "${diag_file}" 'TERM_RUNLIMIT' || \
+     contains_pattern "${out_log}" 'TERM_RUNLIMIT' || \
+     contains_pattern "${err_log}" 'TERM_RUNLIMIT'; then
+    rm -f "${diag_file}"
+    printf 'runlimit'
+    return 0
+  fi
+
+  rm -f "${diag_file}"
+  if [[ "${mode}" == "predict" ]]; then
+    printf 'predict_error'
+  else
+    printf 'segment_error'
+  fi
+}
+
+query_job_state() {
+  local job_id="$1"
+  local state=""
+  if is_remote_submit_enabled; then
+    state="$(ssh -o BatchMode=yes "${LSF_SUBMIT_HOST}" bjobs -a -noheader -o stat "${job_id}" 2>/dev/null | awk 'NF { print $1; exit }' || true)"
+  elif command -v bjobs >/dev/null 2>&1; then
+    state="$(bjobs -a -noheader -o stat "${job_id}" 2>/dev/null | awk 'NF { print $1; exit }' || true)"
+  fi
+  printf '%s' "${state}"
+}
+
+submit_attempt_script() {
+  local script_path="$1"
+  if is_remote_submit_enabled; then
+    ssh -o BatchMode=yes "${LSF_SUBMIT_HOST}" bsub < "${script_path}"
+  else
+    bsub < "${script_path}"
+  fi
+}
+
+require_submit_transport() {
+  if [[ "${AUTO_SUBMIT}" != "1" || "${DRY_RUN}" == "1" ]]; then
+    return 0
+  fi
+
+  if is_remote_submit_enabled; then
+    if ! command -v ssh >/dev/null 2>&1; then
+      echo "ERROR: ssh is required for remote LSF submission." >&2
+      exit 1
+    fi
+    if ! ssh -o BatchMode=yes "${LSF_SUBMIT_HOST}" 'command -v bsub >/dev/null 2>&1'; then
+      echo "ERROR: Could not reach remote bsub on ${LSF_SUBMIT_HOST}. Use SSH keys/agent or set LSF_SUBMIT_HOST=local if bsub is available locally." >&2
+      exit 1
+    fi
+    return 0
+  fi
+
+  if ! command -v bsub >/dev/null 2>&1; then
+    echo "ERROR: bsub not found locally. Set LSF_SUBMIT_HOST to a reachable submission host." >&2
+    exit 1
+  fi
+}
+
+require_segger_binary() {
+  if [[ -z "${SEGGER_BIN}" ]]; then
+    echo "ERROR: SEGGER_BIN is empty." >&2
+    exit 1
+  fi
+}
+
+run_dashboard_for_root() {
+  local dataset_root="$1"
+  bash "${SCRIPT_DIR}/benchmark_status_dashboard.sh" --root "${dataset_root}" >/dev/null
+}
+
+run_validation_for_root() {
+  local dataset_root="$1"
+  local input_dir="$2"
+  local scrna_ref="$3"
+  local tissue_type="$4"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    return 0
+  fi
+
+  if [[ -n "${tissue_type}" ]]; then
+    bash "${SCRIPT_DIR}/build_benchmark_validation_table.sh" \
+      --root "${dataset_root}" \
+      --input-dir "${input_dir}" \
+      --tissue-type "${tissue_type}" \
+      --include-default-10x true \
+      >/dev/null
+  elif [[ -z "${scrna_ref}" ]]; then
+    bash "${SCRIPT_DIR}/build_benchmark_validation_table.sh" \
+      --root "${dataset_root}" \
+      --input-dir "${input_dir}" \
+      --include-default-10x true \
+      >/dev/null
+  else
+    bash "${SCRIPT_DIR}/build_benchmark_validation_table.sh" \
+      --root "${dataset_root}" \
+      --input-dir "${input_dir}" \
+      --scrna-reference-path "${scrna_ref}" \
+      --include-default-10x true \
+      >/dev/null
+  fi
+}
+
+run_or_plan_job() {
+  local dataset_root="$1"
+  local dataset="$2"
+  local input_dir="$3"
+  local scrna_ref="$4"
+  local tissue_type="$5"
+  local job="$6"
+  local group="$7"
+  local mode="$8"
+  local use_3d="$9"
+  local expansion="${10}"
+  local txk="${11}"
+  local txdist="${12}"
+  local layers="${13}"
+  local heads="${14}"
+  local cellsmin="${15}"
+  local minqv="${16}"
+  local alignment="${17}"
+  local align_weight="${18}"
+  local pred_scale="${19}"
+  local fragment="${20}"
+
+  local lane
+  local summary_file
+  local skipped_file="${dataset_root}/summaries/skipped_existing.tsv"
+  local seg_dir="${dataset_root}/runs/${job}"
+  local log_file
+  local attempt=1
+  local queue_name=""
+  local gmem=""
+  local mem_gb=""
+  local wall_time=""
+  local export_queue_name=""
+  local export_mem_gb=""
+  local export_wall_time=""
+  local segment_job_id=""
+  local export_job_id=""
+  local state=""
+  local attempt_status="pending"
+  local segment_status="pending"
+  local export_status="not_requested"
+  local export_note=""
+  local note=""
+  local primary_attempt_script=""
+  local export_attempt_script=""
+  local bsub_output=""
+  local export_submit_output=""
+  local export_suffix=""
+  local baseline_dep_name=""
+
+  lane="$(job_lane "${group}")"
+  summary_file="$(summary_file_for_group "${dataset_root}" "${group}")"
+  log_file="$(canonical_log_for_job "${dataset_root}" "${job}" "${group}")"
+
+  if [[ "${RESUME_IF_EXISTS}" == "1" ]] && job_complete "${dataset_root}" "${job}"; then
+    note="existing results found in runs/ or exports/; skipping"
+    upsert_status_row \
+      "${skipped_file}" "${job}" "${lane}" "skipped_existing" "0" "${note}" "${seg_dir}" "${log_file}" \
+      "skipped_existing" "skipped_existing" "" "" "existing_results"
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} status=skipped_existing"
+    rebuild_all_jobs_summary "${dataset_root}"
+    return 0
+  fi
+
+  attempt="$(next_attempt_for_job "${dataset_root}" "${job}")"
+  baseline_dep_name="segger_${dataset}_baseline_${RUN_LABEL}_a${attempt}"
+
+  IFS=$'\t' read -r queue_name gmem mem_gb wall_time <<< "$(resolve_primary_resources "${dataset}" "${mode}" "${fragment}" "${alignment}")"
+  if job_exports_requested; then
+    IFS=$'\t' read -r export_queue_name export_mem_gb export_wall_time <<< "$(resolve_export_resources)"
+    export_status="planned"
+    if [[ "${RUN_XENIUM_EXPORT}" == "1" ]] && ! xenium_export_supported_for_input "${input_dir}"; then
+      if [[ "${SKIP_UNSUPPORTED_XENIUM_EXPORT}" == "1" ]]; then
+        export_note="xenium_missing_source_will_skip"
+      else
+        export_note="xenium_missing_source_required"
+      fi
+    fi
+  else
+    export_status="not_requested"
+  fi
+
+  primary_attempt_script="$(render_primary_attempt_script \
+    "${dataset_root}" "${dataset}" "${input_dir}" "${scrna_ref}" "${tissue_type}" \
+    "${job}" "${group}" "${mode}" "${use_3d}" "${expansion}" "${txk}" "${txdist}" \
+    "${layers}" "${heads}" "${cellsmin}" "${minqv}" "${alignment}" "${align_weight}" \
+    "${pred_scale}" "${fragment}" "${attempt}" "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}")"
+  if job_exports_requested; then
+    export_attempt_script="$(render_export_attempt_script \
+      "${dataset_root}" "${dataset}" "${input_dir}" "${job}" "${attempt}" \
+      "${export_queue_name}" "${export_mem_gb}" "${export_wall_time}")"
+  fi
+
+  note="$(status_note "${queue_name}" "${gmem}" "${attempt}" "" "")"
+  if [[ "${mode}" == "predict" ]]; then
+    note="$(status_note "${queue_name}" "${gmem}" "${attempt}" "" "depends_on=${baseline_dep_name}")"
+  fi
+
+  if [[ "${AUTO_SUBMIT}" != "1" || "${DRY_RUN}" == "1" ]]; then
+    upsert_status_row \
+      "${summary_file}" "${job}" "${lane}" "pending" "0" "planned ${note}" "${seg_dir}" "${log_file}" \
+      "pending" "${export_status}" "" "" "${export_note}"
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "START job=${job} planned_only manifest_write_begin ${note}"
+    if [[ -n "${export_attempt_script}" ]]; then
+      append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} planned_only export_manifest_write_complete export_note=${export_note:-none}"
+    fi
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} planned_only manifest_write_complete"
+    rebuild_all_jobs_summary "${dataset_root}"
+    announce_job_event "PLANNED" "${dataset}" "${job}" "${note}"
+    return 0
+  fi
+
+  if [[ ! -x "${primary_attempt_script}" ]]; then
+    segment_status="$(classify_primary_exit_status "${mode}" "1")"
+    upsert_status_row \
+      "${summary_file}" "${job}" "${lane}" "${segment_status}" "0" "attempt script missing" "${seg_dir}" "${log_file}" \
+      "${segment_status}" "${export_status}" "" "" "${export_note}"
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "START job=${job} submit_failed"
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "FAIL job=${job} step=submit (attempt script missing)"
+    rebuild_all_jobs_summary "${dataset_root}"
+    announce_job_event "ERROR" "${dataset}" "${job}" "submit failed (attempt script missing)"
+    return 1
+  fi
+
+  bsub_output="$(submit_attempt_script "${primary_attempt_script}" 2>&1 || true)"
+  segment_job_id="$(printf '%s\n' "${bsub_output}" | sed -n 's/.*Job <\([0-9][0-9]*\)>.*/\1/p' | head -n1 || true)"
+  if [[ -z "${segment_job_id}" ]]; then
+    segment_status="$(classify_primary_exit_status "${mode}" "1")"
+    upsert_status_row \
+      "${summary_file}" "${job}" "${lane}" "${segment_status}" "0" "submit failed" "${seg_dir}" "${log_file}" \
+      "${segment_status}" "${export_status}" "" "" "${export_note}"
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "START job=${job} submit_failed"
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "FAIL job=${job} step=submit (could not parse job id)"
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "SUBMIT_STDERR ${bsub_output}"
+    rebuild_all_jobs_summary "${dataset_root}"
+    announce_job_event "ERROR" "${dataset}" "${job}" "submit failed (${bsub_output})"
+    return 1
+  fi
+
+  state="$(query_job_state "${segment_job_id}")"
+  attempt_status="pending"
+  segment_status="pending"
+  case "${state}" in
+    RUN|PROV)
+      attempt_status="running"
+      segment_status="running"
+      ;;
+    PEND|"")
+      attempt_status="pending"
+      segment_status="pending"
+      ;;
+  esac
+
+  if [[ -n "${export_attempt_script}" ]]; then
+    if [[ ! -x "${export_attempt_script}" ]]; then
+      export_status="export_error"
+      export_note="export_script_missing"
+    else
+      export_submit_output="$(submit_attempt_script "${export_attempt_script}" 2>&1 || true)"
+      export_job_id="$(printf '%s\n' "${export_submit_output}" | sed -n 's/.*Job <\([0-9][0-9]*\)>.*/\1/p' | head -n1 || true)"
+      if [[ -z "${export_job_id}" ]]; then
+        export_status="export_error"
+        export_note="export_submit_failed"
+      fi
+    fi
+  fi
+
+  export_suffix=""
+  if [[ "${mode}" == "predict" ]]; then
+    export_suffix="depends_on=${baseline_dep_name}"
+  fi
+  if [[ -n "${export_job_id}" ]]; then
+    if [[ -n "${export_suffix}" ]]; then
+      export_suffix+=" "
+    fi
+    export_suffix+="export_lsf_job=${export_job_id}"
+  fi
+  note="$(status_note "${queue_name}" "${gmem}" "${attempt}" "${segment_job_id}" "${export_suffix}")"
+
+  append_canonical_log "${dataset_root}" "${job}" "${group}" "START job=${job} submit_only enqueue_begin ${note}"
+  append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} submit_only enqueue_complete lsf_state=${state:-unknown}"
+  if [[ -n "${export_job_id}" ]]; then
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} export_submit enqueue_complete export_lsf_job=${export_job_id}"
+  fi
+  upsert_status_row \
+    "${summary_file}" "${job}" "${lane}" "${attempt_status}" "0" "${note}" "${seg_dir}" "${log_file}" \
+    "${segment_status}" "${export_status}" "${segment_job_id}" "${export_job_id}" "${export_note}"
+  rebuild_all_jobs_summary "${dataset_root}"
+  announce_job_event "SUBMITTED" "${dataset}" "${job}" "${note} state=${state:-unknown}"
+  return 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_CLUSTER_CODE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+OUTPUT_ROOT="${OUTPUT_ROOT:-/omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed}"
+DATASET_KEYS="${DATASET_KEYS:-all}"
+DRY_RUN="$(normalize_bool "${DRY_RUN:-1}")"
+AUTO_SUBMIT="$(normalize_bool "${AUTO_SUBMIT:-0}")"
+RUN_EXPORTS="$(normalize_bool "${RUN_EXPORTS:-1}")"
+RUN_ANNDATA_EXPORT="$(normalize_bool "${RUN_ANNDATA_EXPORT:-${RUN_EXPORTS}}")"
+RUN_XENIUM_EXPORT="$(normalize_bool "${RUN_XENIUM_EXPORT:-${RUN_EXPORTS}}")"
+SKIP_UNSUPPORTED_XENIUM_EXPORT="$(normalize_bool "${SKIP_UNSUPPORTED_XENIUM_EXPORT:-1}")"
+RUN_VALIDATION_TABLE="$(normalize_bool "${RUN_VALIDATION_TABLE:-1}")"
+RUN_STATUS_SNAPSHOT="$(normalize_bool "${RUN_STATUS_SNAPSHOT:-1}")"
+ENABLE_ALIGNMENT_JOBS="$(normalize_bool "${ENABLE_ALIGNMENT_JOBS:-1}")"
+RESUME_IF_EXISTS="$(normalize_bool "${RESUME_IF_EXISTS:-1}")"
+RESET_DATASET_ROOT="$(normalize_bool "${RESET_DATASET_ROOT:-0}")"
+AUTO_FETCH_SCRNA_REFS="$(normalize_bool "${AUTO_FETCH_SCRNA_REFS:-0}")"
+POLL_INTERVAL_SEC="${POLL_INTERVAL_SEC:-60}"
+PEND_FALLBACK_MIN="${PEND_FALLBACK_MIN:-15}"
+MAX_ACTIVE_STANDARD="${MAX_ACTIVE_STANDARD:-6}"
+MAX_ACTIVE_FRAGMENT="${MAX_ACTIVE_FRAGMENT:-2}"
+ROUTE_ELIGIBLE_TO_GPU="$(normalize_bool "${ROUTE_ELIGIBLE_TO_GPU:-1}")"
+GPU_QUEUE_DEFAULT="${GPU_QUEUE_DEFAULT:-gpu}"
+GPU_QUEUE_PRO="${GPU_QUEUE_PRO:-gpu-pro}"
+EXPORT_QUEUE="${EXPORT_QUEUE:-${GPU_QUEUE_DEFAULT}}"
+ALIGNMENT_GPU_QUEUE="${ALIGNMENT_GPU_QUEUE:-}"
+GPU_QUEUE_MAX_GMEM="${GPU_QUEUE_MAX_GMEM:-40}"
+GPU_QUEUE_MAX_MEM_GB="${GPU_QUEUE_MAX_MEM_GB:-384}"
+N_EPOCHS="${N_EPOCHS:-20}"
+SEGGER_BIN="${SEGGER_BIN:-segger}"
+CLUSTER_CODE_ROOT="${CLUSTER_CODE_ROOT:-${DEFAULT_CLUSTER_CODE_ROOT}}"
+SEGMENT_WALL_TIME_DEFAULT="${SEGMENT_WALL_TIME_DEFAULT:-6:00}"
+EXPORT_WALL_TIME_DEFAULT="${EXPORT_WALL_TIME_DEFAULT:-6:00}"
+RUN_LABEL="${RUN_LABEL:-$(date '+%Y%m%d_%H%M%S')}"
+RUN_LABEL="$(printf '%s' "${RUN_LABEL}" | tr -cd '[:alnum:]_-')"
+if [[ -z "${RUN_LABEL}" ]]; then
+  RUN_LABEL="$(date '+%Y%m%d_%H%M%S')"
+fi
+ALIGNMENT_REFERENCE_MODE="$(normalize_alignment_reference_mode "${ALIGNMENT_REFERENCE_MODE:-path}")"
+ALIGNMENT_SCRNA_CELLTYPE_COLUMN="${ALIGNMENT_SCRNA_CELLTYPE_COLUMN:-cell_type}"
+LSF_SUBMIT_HOST="${LSF_SUBMIT_HOST:-local}"
+case "${LSF_SUBMIT_HOST}" in
+  local|LOCAL|none|NONE|-)
+    LSF_SUBMIT_HOST=""
+    ;;
+esac
+LSF_EXEC_SHELL="${LSF_EXEC_SHELL:-/bin/bash}"
+SCRNA_REF_ROOT="${SCRNA_REF_ROOT:-/dkfz/cluster/gpu/data/OE0606/elihei/segger_experiments/data_raw/scrnaseq}"
+SCRNA_CACHE_DIR="${SCRNA_CACHE_DIR:-${SCRNA_REF_ROOT}}"
+CELLXGENE_FETCH_CMD="${CELLXGENE_FETCH_CMD:-}"
+MICROMAMBA_BIN="${MICROMAMBA_BIN:-${HOME}/.local/bin/micromamba}"
+MICROMAMBA_ROOT_PREFIX="${MICROMAMBA_ROOT_PREFIX:-/dkfz/cluster/gpu/data/OE0606/elihei/micromamba}"
+SEGGER_ENV_PATH="${SEGGER_ENV_PATH:-/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2}"
+PRESERVE_PYTHONPATH="$(normalize_bool "${PRESERVE_PYTHONPATH:-0}")"
+DEFAULT_ACTIVATE_CMD="$(cat <<EOF
+if [[ $(printf '%q' "${PRESERVE_PYTHONPATH}") != "1" ]]; then
+    unset PYTHONPATH || true
+fi
+export MAMBA_NO_ENV_PROMPT=1
+export CONDA_PROMPT_MODIFIER=""
+export PYTHONNOUSERSITE=1
+export MAMBA_EXE=$(printf '%q' "${MICROMAMBA_BIN}")
+export MAMBA_ROOT_PREFIX=$(printf '%q' "${MICROMAMBA_ROOT_PREFIX}")
+__mamba_setup="\$("\$MAMBA_EXE" shell hook --shell bash --root-prefix "\$MAMBA_ROOT_PREFIX" 2> /dev/null)"
+if [ \$? -eq 0 ]; then
+    eval "\$__mamba_setup"
+else
+    alias micromamba="\$MAMBA_EXE"
+fi
+unset __mamba_setup
+micromamba activate $(printf '%q' "${SEGGER_ENV_PATH}")
+EOF
+)"
+MAMBA_ACTIVATE_CMD="${MAMBA_ACTIVATE_CMD:-${DEFAULT_ACTIVATE_CMD}}"
+
+mkdir -p "${OUTPUT_ROOT}/datasets" "${OUTPUT_ROOT}/summaries"
+
+printf "[%s] OUTPUT_ROOT=%s\n" "$(timestamp)" "${OUTPUT_ROOT}"
+printf "[%s] DATASET_KEYS=%s\n" "$(timestamp)" "${DATASET_KEYS}"
+printf "[%s] DRY_RUN=%s AUTO_SUBMIT=%s RUN_ANNDATA_EXPORT=%s RUN_XENIUM_EXPORT=%s SKIP_UNSUPPORTED_XENIUM_EXPORT=%s RUN_VALIDATION_TABLE=%s RUN_STATUS_SNAPSHOT=%s\n" \
+  "$(timestamp)" "${DRY_RUN}" "${AUTO_SUBMIT}" "${RUN_ANNDATA_EXPORT}" "${RUN_XENIUM_EXPORT}" "${SKIP_UNSUPPORTED_XENIUM_EXPORT}" "${RUN_VALIDATION_TABLE}" "${RUN_STATUS_SNAPSHOT}"
+printf "[%s] ENABLE_ALIGNMENT_JOBS=%s\n" "$(timestamp)" "${ENABLE_ALIGNMENT_JOBS}"
+printf "[%s] RESUME_IF_EXISTS=%s RESET_DATASET_ROOT=%s RUN_LABEL=%s\n" \
+  "$(timestamp)" "${RESUME_IF_EXISTS}" "${RESET_DATASET_ROOT}" "${RUN_LABEL}"
+printf "[%s] ALIGNMENT_REFERENCE_MODE=%s\n" "$(timestamp)" "${ALIGNMENT_REFERENCE_MODE}"
+printf "[%s] ALIGNMENT_SCRNA_CELLTYPE_COLUMN=%s\n" "$(timestamp)" "${ALIGNMENT_SCRNA_CELLTYPE_COLUMN}"
+if is_remote_submit_enabled; then
+  printf "[%s] LSF submit transport=ssh host=%s\n" "$(timestamp)" "${LSF_SUBMIT_HOST}"
+else
+  printf "[%s] LSF submit transport=local\n" "$(timestamp)"
+fi
+printf "[%s] LSF_EXEC_SHELL=%s\n" "$(timestamp)" "${LSF_EXEC_SHELL}"
+printf "[%s] CLUSTER_CODE_ROOT=%s\n" "$(timestamp)" "${CLUSTER_CODE_ROOT}"
+printf "[%s] SEGGER_BIN=%s\n" "$(timestamp)" "${SEGGER_BIN}"
+printf "[%s] MICROMAMBA_BIN=%s\n" "$(timestamp)" "${MICROMAMBA_BIN}"
+printf "[%s] MICROMAMBA_ROOT_PREFIX=%s\n" "$(timestamp)" "${MICROMAMBA_ROOT_PREFIX}"
+printf "[%s] SEGGER_ENV_PATH=%s\n" "$(timestamp)" "${SEGGER_ENV_PATH}"
+printf "[%s] SCRNA_REF_ROOT=%s\n" "$(timestamp)" "${SCRNA_REF_ROOT}"
+printf "[%s] SCRNA_CACHE_DIR=%s\n" "$(timestamp)" "${SCRNA_CACHE_DIR}"
+printf "[%s] SEGMENT_WALL_TIME_DEFAULT=%s EXPORT_WALL_TIME_DEFAULT=%s PRESERVE_PYTHONPATH=%s\n" \
+  "$(timestamp)" "${SEGMENT_WALL_TIME_DEFAULT}" "${EXPORT_WALL_TIME_DEFAULT}" "${PRESERVE_PYTHONPATH}"
+printf "[%s] MAX_ACTIVE_STANDARD=%s MAX_ACTIVE_FRAGMENT=%s (currently informational)\n" \
+  "$(timestamp)" "${MAX_ACTIVE_STANDARD}" "${MAX_ACTIVE_FRAGMENT}"
+printf "[%s] QUEUE_ROUTING route_eligible=%s gpu_default=%s gpu_pro=%s export=%s align_override=%s max_gmem=%sG max_mem=%sG\n" \
+  "$(timestamp)" "${ROUTE_ELIGIBLE_TO_GPU}" "${GPU_QUEUE_DEFAULT}" "${GPU_QUEUE_PRO}" "${EXPORT_QUEUE}" "${ALIGNMENT_GPU_QUEUE:-<none>}" "${GPU_QUEUE_MAX_GMEM}" "${GPU_QUEUE_MAX_MEM_GB}"
+
+require_submit_transport
+require_segger_binary
+
+while IFS= read -r dataset; do
+  [[ -z "${dataset}" ]] && continue
+
+  dataset_root="${OUTPUT_ROOT}/datasets/${dataset}"
+  input_dir="$(dataset_input_dir "${dataset}")"
+  tissue_type="$(dataset_tissue_type "${dataset}")"
+  scrna_ref="$(resolve_scrna_reference "${dataset}")"
+
+  printf "[%s] Preparing dataset=%s input_dir=%s tissue_type=%s scrna_ref=%s\n" \
+    "$(timestamp)" "${dataset}" "${input_dir}" "${tissue_type:-<none>}" "${scrna_ref:-<none>}"
+  ensure_alignment_reference_ready "${dataset}" "${scrna_ref}" "${tissue_type}"
+
+  if [[ "${RESET_DATASET_ROOT}" == "1" ]]; then
+    printf "[%s] RESET_DATASET_ROOT=1 removing %s\n" "$(timestamp)" "${dataset_root}"
+    rm -rf "${dataset_root}"
+  fi
+
+  init_dataset_root "${dataset_root}"
+  write_dataset_context "${dataset_root}" "${dataset}" "${input_dir}" "${scrna_ref}" "${tissue_type}"
+  write_dataset_plan "${dataset_root}"
+
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    IFS='|' read -r \
+      job group mode use_3d expansion txk txdist layers heads cellsmin minqv alignment align_weight pred_scale fragment \
+      <<< "${line}"
+    run_or_plan_job \
+      "${dataset_root}" "${dataset}" "${input_dir}" "${scrna_ref}" "${tissue_type}" \
+      "${job}" "${group}" "${mode}" "${use_3d}" "${expansion}" "${txk}" "${txdist}" \
+      "${layers}" "${heads}" "${cellsmin}" "${minqv}" "${alignment}" "${align_weight}" \
+      "${pred_scale}" "${fragment}" || true
+  done <<EOF
+$(job_specs)
+EOF
+
+  rebuild_all_jobs_summary "${dataset_root}"
+
+  if [[ "${RUN_VALIDATION_TABLE}" == "1" ]]; then
+    if [[ "${AUTO_SUBMIT}" != "1" && "${DRY_RUN}" != "1" ]]; then
+      run_validation_for_root "${dataset_root}" "${input_dir}" "${scrna_ref}" "${tissue_type}" || true
+    fi
+  fi
+
+  if [[ "${RUN_STATUS_SNAPSHOT}" == "1" ]]; then
+    run_dashboard_for_root "${dataset_root}" || true
+  fi
+done <<EOF
+$(resolve_requested_datasets)
+EOF
+
+if [[ -f "${SCRIPT_DIR}/benchmark_status_dashboard_lsf_multi.sh" && "${RUN_STATUS_SNAPSHOT}" == "1" ]]; then
+  bash "${SCRIPT_DIR}/benchmark_status_dashboard_lsf_multi.sh" --root "${OUTPUT_ROOT}" >/dev/null || true
+fi
+if [[ -f "${SCRIPT_DIR}/build_benchmark_validation_table_lsf_multi.sh" && "${RUN_VALIDATION_TABLE}" == "1" && "${AUTO_SUBMIT}" != "1" && "${DRY_RUN}" != "1" ]]; then
+  bash "${SCRIPT_DIR}/build_benchmark_validation_table_lsf_multi.sh" --root "${OUTPUT_ROOT}" >/dev/null || true
+fi
+
+printf "[%s] Completed LSF benchmark orchestration.\n" "$(timestamp)"

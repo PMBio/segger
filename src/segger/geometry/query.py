@@ -140,34 +140,51 @@ def _points_in_polygons_intersects(
     if idx_missing.empty:
         return contains
 
-    # Buffer-filter on GPU for a large number of candidates
     pts_ixn = points.iloc[idx_missing]
     ply_ixn = polygons_to_geoseries(polygons, backend='geopandas')
-    if len(pts_ixn) >= max_unassigned_points:
-        ply_buf = polygons_to_geoseries(
-            ply_ixn.buffer(boundary_buffer),
-            backend='cuspatial',
-        )
-        in_buffer = _points_in_polygons_contains(pts_ixn, ply_buf)
-        in_buffer = in_buffer['index_query'].drop_duplicates()
-        pts_ixn = pts_ixn.iloc[in_buffer]
-
     if pts_ixn.empty:
         return contains
 
-    # Final CPU Join on the selected candidate set
-    pts_ixn = points_to_geoseries(pts_ixn, backend='geopandas')
-    boundary = gpd.sjoin(
-        gpd.GeoDataFrame(geometry=pts_ixn),
-        gpd.GeoDataFrame(geometry=ply_ixn),
-        predicate='intersects'
-    )
-    boundary = cudf.DataFrame(
-        boundary
-        .rename({'index_right': 'index_match'}, axis=1)
-        .reset_index(names='index_query')
-        [['index_query', 'index_match']]
-    )
+    polygon_frame = gpd.GeoDataFrame(geometry=ply_ixn)
+    if max_unassigned_points <= 0 or len(pts_ixn) < max_unassigned_points:
+        pts_ixn = points_to_geoseries(pts_ixn, backend='geopandas')
+        boundary = gpd.sjoin(
+            gpd.GeoDataFrame(geometry=pts_ixn),
+            polygon_frame,
+            predicate='intersects'
+        )
+        boundary = cudf.DataFrame(
+            boundary
+            .rename({'index_right': 'index_match'}, axis=1)
+            .reset_index(names='index_query')
+            [['index_query', 'index_match']]
+        )
+    else:
+        batch_size = max_unassigned_points
+        boundary_frames = []
+        for start_idx in range(0, len(pts_ixn), batch_size):
+            end_idx = min(start_idx + batch_size, len(pts_ixn))
+            pts_batch = points_to_geoseries(
+                pts_ixn.iloc[start_idx:end_idx],
+                backend='geopandas',
+            )
+            boundary = gpd.sjoin(
+                gpd.GeoDataFrame(geometry=pts_batch),
+                polygon_frame,
+                predicate='intersects'
+            )
+            if boundary.empty:
+                continue
+            boundary_frames.append(cudf.DataFrame(
+                boundary
+                .rename({'index_right': 'index_match'}, axis=1)
+                .reset_index(names='index_query')
+                [['index_query', 'index_match']]
+            ))
+
+        if not boundary_frames:
+            return contains
+        boundary = cudf.concat(boundary_frames, ignore_index=True)
 
     # Combine results from the initial 'contains' and boundary 'intersects'
     return cudf.concat([contains, boundary]).reset_index(drop=True)

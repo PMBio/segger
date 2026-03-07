@@ -11,6 +11,7 @@ import torch
 import gc
 import os
 import numpy as np
+import logging
 
 from .tile_dataset import (
     TileFitDataset,
@@ -25,6 +26,8 @@ from ..io import (
 from .utils import setup_anndata, setup_heterodata
 from .tiling import QuadTreeTiling, SquareTiling
 from .partition import PartitionSampler
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _load_me_gene_pairs_file(path: Path) -> list[tuple[str, str]]:
@@ -146,9 +149,9 @@ class ISTDataModule(LightningDataModule):
         construction. Values > 1 expand, values < 1 shrink.
     tiling_mode : {"adaptive", "square"}, default="adaptive"
         Strategy for spatial graph tiling (adaptive quadtree or grid).
-    tiling_margin_training : float, default=20.0
+    tiling_margin_training : float, default=8.0
         Margin width (in µm) added to tiles during training.
-    tiling_margin_prediction : float, default=20.0
+    tiling_margin_prediction : float, default=8.0
         Margin width (in µm) added to tiles during prediction.
     tiling_nodes_per_tile : int, default=50000
         Maximum number of nodes per tile for adaptive tiling.
@@ -184,8 +187,8 @@ class ISTDataModule(LightningDataModule):
     scrna_celltype_column: str = "cell_type"
     me_gene_pairs: Optional[list[tuple[str, str]]] = None
     tiling_mode: Literal["adaptive", "square"] = "adaptive"  # TODO: Remove (benchmarking only)
-    tiling_margin_training: float = 20.
-    tiling_margin_prediction: float = 20.
+    tiling_margin_training: float = 8.
+    tiling_margin_prediction: float = 8.
     tiling_nodes_per_tile: int = 50_000
     tiling_side_length: float = 250.  # TODO: Remove (benchmarking only)
     training_fraction: float = 0.75
@@ -309,19 +312,70 @@ class ISTDataModule(LightningDataModule):
                 f"'{self.segmentation_graph_mode}'."
             )
 
-        if tx_fields.compartment in tx.columns:
-            tx_mask = pl.col(tx_fields.compartment).is_in(compartments)
-        else:
-            tx_mask = pl.col(tx_fields.cell_id).is_not_null()
+        def _build_reference_masks(
+            selected_boundary_type: str,
+            selected_compartments: list[int],
+        ) -> tuple[pl.Expr, np.ndarray, pl.DataFrame]:
+            if tx_fields.compartment in tx.columns:
+                selected_tx_mask = pl.col(tx_fields.compartment).is_in(selected_compartments)
+            else:
+                selected_tx_mask = pl.col(tx_fields.cell_id).is_not_null()
 
-        if bd_fields.boundary_type in bd.columns:
-            bd_mask = bd[bd_fields.boundary_type] == boundary_type
-        else:
-            bd_mask = np.ones(len(bd), dtype=bool)
+            if bd_fields.boundary_type in bd.columns:
+                selected_bd_mask = bd[bd_fields.boundary_type] == selected_boundary_type
+            else:
+                selected_bd_mask = np.ones(len(bd), dtype=bool)
+
+            valid_boundary_ids = (
+                bd.loc[selected_bd_mask, bd_fields.id]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+            if len(valid_boundary_ids) == 0:
+                raise ValueError(
+                    f"No '{selected_boundary_type}' boundaries with valid "
+                    f"'{bd_fields.id}' values were found."
+                )
+
+            selected_tx_mask = (
+                selected_tx_mask
+                & pl.col(tx_fields.cell_id).cast(pl.String).is_in(valid_boundary_ids)
+            )
+            selected_tx = tx.filter(selected_tx_mask)
+            return selected_tx_mask, selected_bd_mask, selected_tx
+
+        tx_mask, bd_mask, tx_reference = _build_reference_masks(
+            boundary_type,
+            compartments,
+        )
+
+        # Some datasets (e.g. MERSCOPE/CosMX variants) may not provide explicit
+        # nucleus assignments. Fall back to cell-compartment supervision.
+        if tx_reference.height == 0 and self.segmentation_graph_mode == "nucleus":
+            fallback_compartments = [
+                tx_fields.nucleus_value,
+                tx_fields.cytoplasmic_value,
+            ]
+            tx_mask_fallback, bd_mask_fallback, tx_reference_fallback = _build_reference_masks(
+                bd_fields.cell_value,
+                fallback_compartments,
+            )
+            if tx_reference_fallback.height > 0:
+                LOGGER.warning(
+                    "No nucleus-assigned transcripts found; falling back to "
+                    "cell-compartment supervision for reference AnnData."
+                )
+                boundary_type = bd_fields.cell_value
+                compartments = fallback_compartments
+                tx_mask = tx_mask_fallback
+                bd_mask = bd_mask_fallback
+                tx_reference = tx_reference_fallback
 
         # Generate reference AnnData
         self.ad = setup_anndata(
-            transcripts=tx.filter(tx_mask),
+            transcripts=tx_reference,
             boundaries=bd[bd_mask],
             cell_column=tx_fields.cell_id,
             cells_embedding_size=self.cells_embedding_size,
@@ -387,14 +441,78 @@ class ISTDataModule(LightningDataModule):
     def setup(self, stage: str):
         """TODO: Description
         """
+        def _margin_candidates(primary_margin: float) -> list[float]:
+            primary = max(0.0, float(primary_margin))
+            candidates = [primary]
+            for candidate in (8.0, 6.0, 4.0, 2.0, 1.0, 0.0):
+                if candidate not in candidates and candidate <= primary:
+                    candidates.append(candidate)
+            if 0.0 not in candidates:
+                candidates.append(0.0)
+            return candidates
+
+        def _is_recoverable_tiling_error(exc: Exception) -> bool:
+            message = str(exc).lower()
+            return any(
+                token in message
+                for token in (
+                    "margin (",
+                    "tile(s) to disappear",
+                    "unassigned nodes",
+                    "bincount only supports",
+                )
+            )
+
+        def _build_fit_dataset_with_fallback() -> TileFitDataset:
+            candidates = _margin_candidates(self.tiling_margin_training)
+            last_exc: Exception | None = None
+            for margin in candidates:
+                try:
+                    if margin != self.tiling_margin_training:
+                        LOGGER.warning(
+                            "Retrying TileFitDataset with reduced margin %.2f (requested %.2f).",
+                            margin,
+                            self.tiling_margin_training,
+                        )
+                    return TileFitDataset(
+                        data=self.data,
+                        tiling=self.tiling,
+                        margin=margin,
+                        clone=True,
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    if not _is_recoverable_tiling_error(exc):
+                        raise
+                    last_exc = exc
+            assert last_exc is not None
+            raise last_exc
+
+        def _build_predict_dataset_with_fallback() -> TilePredictDataset:
+            candidates = _margin_candidates(self.tiling_margin_prediction)
+            last_exc: Exception | None = None
+            for margin in candidates:
+                try:
+                    if margin != self.tiling_margin_prediction:
+                        LOGGER.warning(
+                            "Retrying TilePredictDataset with reduced margin %.2f (requested %.2f).",
+                            margin,
+                            self.tiling_margin_prediction,
+                        )
+                    return TilePredictDataset(
+                        data=self.data,
+                        tiling=self.tiling,
+                        margin=margin,
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    if not _is_recoverable_tiling_error(exc):
+                        raise
+                    last_exc = exc
+            assert last_exc is not None
+            raise last_exc
+
         # Tile dataset (inner margin) for training
         if stage == "fit":
-            self.fit_dataset = TileFitDataset(
-                data=self.data,
-                tiling=self.tiling,
-                margin=self.tiling_margin_training,            
-                clone=True,  # Keep: Tiling removes edges needed in prediction
-            )
+            self.fit_dataset = _build_fit_dataset_with_fallback()
             # Setup training-validation split
             n = self.fit_dataset._num_partitions
             indices = torch.randperm(n)
@@ -405,11 +523,7 @@ class ISTDataModule(LightningDataModule):
         # Tile dataset (outer margin) for prediction
         if stage == "predict":
             self.data = self.data.cuda()
-            self.predict_dataset = TilePredictDataset(
-                data=self.data,
-                tiling=self.tiling,
-                margin=self.tiling_margin_prediction,
-            )
+            self.predict_dataset = _build_predict_dataset_with_fallback()
         return super().setup(stage)
 
     def teardown(self, stage):
@@ -434,6 +548,7 @@ class ISTDataModule(LightningDataModule):
             mode="edge",
             subset=self.train_indices.clone(),
             shuffle=True,
+            skip_too_big=True,
         )
         return DataLoader(
             self.fit_dataset,
@@ -450,6 +565,7 @@ class ISTDataModule(LightningDataModule):
             mode="edge",
             subset=self.val_indices.clone(),
             shuffle=False,
+            skip_too_big=True,
         )
         return DataLoader(
             self.fit_dataset,
@@ -465,7 +581,7 @@ class ISTDataModule(LightningDataModule):
             max_num=self.edges_per_batch,
             mode='edge',
             shuffle=False,
-            skip_too_big=False,
+            skip_too_big=True,
         )
         return DataLoader(
             self.predict_dataset,

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any, Literal
 import torch
+import warnings
 
 
 @dataclass
@@ -206,17 +207,27 @@ class PartitionDataset(torch.utils.data.Dataset):
                 HeteroPartition() if self._is_hetero else Partition())
             self.data = data.clone() if clone else data
             # Calculate global no. partitions upfront
+            def _max_non_negative_label(labels: torch.Tensor) -> int:
+                flat = labels.reshape(-1)
+                if flat.numel() == 0:
+                    return -1
+                if torch.is_floating_point(flat):
+                    flat = flat[torch.isfinite(flat)]
+                flat = flat[flat >= 0]
+                if flat.numel() == 0:
+                    return -1
+                return int(flat.max().item())
+
             if self._is_hetero:
                 self._num_partitions = -1
                 for labels in partition.values():
-                    if labels.numel() > 0:
-                        self._num_partitions = max(
-                            self._num_partitions,
-                            labels.max().item()
-                        )
+                    self._num_partitions = max(
+                        self._num_partitions,
+                        _max_non_negative_label(labels),
+                    )
                 self._num_partitions += 1
             else:
-                self._num_partitions = partition.max().item() + 1
+                self._num_partitions = _max_non_negative_label(partition) + 1
             self._permute_nodes(partition)
             self._permute_edges(partition)
 
@@ -380,19 +391,69 @@ class PartitionDataset(torch.utils.data.Dataset):
         labels: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Calculates the permutation and pointers for a set of node labels."""
+        labels = self._sanitize_partition_labels(labels, warn_on_negative=True)
+        if labels.numel() == 0:
+            permutation = torch.empty((0,), dtype=torch.long, device=labels.device)
+            sizes = torch.zeros(
+                (max(self._num_partitions, 0),),
+                dtype=torch.long,
+                device=labels.device,
+            )
+            indptr = torch.cat((
+                torch.tensor([0], dtype=torch.long, device=labels.device),
+                torch.cumsum(sizes, dim=0),
+            ))
+            return permutation, indptr, sizes
+
         # Get permutation to sort nodes by partition
         permutation = torch.argsort(labels)
 
         # Pointers to splits between partitions
         sizes = torch.bincount(
             labels[permutation],
-            minlength=self._num_partitions,
+            minlength=max(self._num_partitions, 0),
         )
         indptr = torch.cat((
-            torch.tensor([0], device=labels.device),
+            torch.tensor([0], dtype=torch.long, device=labels.device),
             torch.cumsum(sizes, dim=0)
         ))
         return permutation, indptr, sizes
+
+    @staticmethod
+    def _sanitize_partition_labels(
+        labels: torch.Tensor,
+        *,
+        warn_on_negative: bool,
+    ) -> torch.Tensor:
+        """Return 1D integer labels safe for indexing and bincount."""
+        labels = labels.reshape(-1)
+        if labels.numel() == 0:
+            return labels.to(torch.long)
+
+        if torch.is_floating_point(labels):
+            if not torch.isfinite(labels).all():
+                raise ValueError("Partition labels contain NaN/inf values.")
+            rounded = labels.round()
+            if not torch.allclose(labels, rounded):
+                raise ValueError("Partition labels must be integer-valued.")
+            labels = rounded
+        labels = labels.to(torch.long)
+
+        negative_mask = labels < 0
+        if negative_mask.any():
+            if warn_on_negative:
+                n_negative = int(negative_mask.sum().item())
+                warnings.warn(
+                    "Partition labels contain unassigned nodes "
+                    f"({n_negative}/{labels.numel()} labels are negative). "
+                    "Assigning these nodes to partition 0 to continue.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            labels = labels.clone()
+            labels[negative_mask] = 0
+
+        return labels
     
     def _permute_edges(
         self,
@@ -464,6 +525,14 @@ class PartitionDataset(torch.utils.data.Dataset):
         """Calculates and applies the permutation for a single edge type."""
         # Map edge index to new indices
         self._map_edge_index(edge_store, src_perm, dst_perm)
+        src_labels = self._sanitize_partition_labels(
+            src_labels,
+            warn_on_negative=False,
+        )
+        dst_labels = self._sanitize_partition_labels(
+            dst_labels,
+            warn_on_negative=False,
+        )
 
         # Get permutation to sort edges by src partition
         src_edge_labels = src_labels[src_perm][edge_store.edge_index[0]]
@@ -489,10 +558,10 @@ class PartitionDataset(torch.utils.data.Dataset):
         # Get partition properties
         sizes = torch.bincount(
             src_edge_labels[mask],
-            minlength=self._num_partitions,
+            minlength=max(self._num_partitions, 0),
         )
         indptr = torch.cat((
-            torch.tensor([0], device=src_edge_labels.device),
+            torch.tensor([0], dtype=torch.long, device=src_edge_labels.device),
             torch.cumsum(sizes, dim=0),
         ))
 

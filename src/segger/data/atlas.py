@@ -10,7 +10,7 @@ Usage
 >>> from segger.data.atlas import fetch_reference
 >>> ref = fetch_reference("colon")
 >>> ref.h5ad_path
-PosixPath('/Users/.../.segger/references/homo_sapiens/colon/colon.h5ad')
+PosixPath('/path/to/cwd/.segger_references/homo_sapiens/large_intestine/large_intestine.h5ad')
 
 The Census dependency (``cellxgene-census``) is optional.  Functions that
 need it will raise ``ImportError`` with installation instructions if it
@@ -22,6 +22,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CACHE_DIR = Path.home() / ".segger" / "references"
+_DEFAULT_CACHE_DIRNAME = ".segger_references"
 
 _TISSUE_ALIASES: dict[str, str] = {
     # colorectal
@@ -106,6 +107,33 @@ _TISSUE_ALIASES: dict[str, str] = {
 # All known input names (aliases + canonical Census tissue_general values)
 _ALL_KNOWN_NAMES: list[str] = sorted(set(_TISSUE_ALIASES.keys()) | set(_TISSUE_ALIASES.values()))
 
+_ORGANISM_ALIASES: dict[str, str] = {
+    # human
+    "human": "homo_sapiens",
+    "h sapiens": "homo_sapiens",
+    "h. sapiens": "homo_sapiens",
+    "homo sapiens": "homo_sapiens",
+    "homo_sapiens": "homo_sapiens",
+    "homosapiens": "homo_sapiens",
+    "homosapiense": "homo_sapiens",
+    "hsapiens": "homo_sapiens",
+    # mouse
+    "mouse": "mus_musculus",
+    "m musculus": "mus_musculus",
+    "m. musculus": "mus_musculus",
+    "mus musculus": "mus_musculus",
+    "mus_musculus": "mus_musculus",
+    "musmusculus": "mus_musculus",
+    "mmusculus": "mus_musculus",
+    # zebrafish
+    "zebrafish": "danio_rerio",
+    "danio rerio": "danio_rerio",
+    "danio_rerio": "danio_rerio",
+}
+_ALL_KNOWN_ORGANISMS: list[str] = sorted(
+    set(_ORGANISM_ALIASES.keys()) | set(_ORGANISM_ALIASES.values())
+)
+
 IMMUNE_KEYWORDS: tuple[str, ...] = (
     "t cell",
     "b cell",
@@ -132,6 +160,94 @@ NON_IMMUNE_KEYWORDS: tuple[str, ...] = (
     "ductal",
     "tumor",
     "cancer",
+)
+
+UNKNOWN_CELL_TYPE_LABELS: frozenset[str] = frozenset(
+    {"", "na", "n/a", "nan", "none", "unassigned", "unknown"}
+)
+OTHER_CELL_TYPE_LABELS: frozenset[str] = frozenset({"other"})
+
+# Ordered coarse rules (first match wins).
+_AUTO_COARSE_CELL_TYPE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Stem/Progenitor", ("transit amplifying", "stem", "progenitor", "precursor")),
+    ("Plasma", ("plasma",)),
+    ("Mast", ("mast",)),
+    (
+        "Myeloid",
+        ("monocyte", "macrophage", "dendritic", "myeloid", "neutrophil"),
+    ),
+    ("Erythroid", ("erythro", "megakary")),
+    ("Endothelial", ("endothelial",)),
+    (
+        "Stromal",
+        (
+            "fibroblast",
+            "stromal",
+            "pericyte",
+            "perivascular",
+            "stellate",
+            "smooth muscle",
+            "mesenchymal",
+            "adipocyte",
+            "vascular associated smooth muscle",
+        ),
+    ),
+    ("Neural/Glial", ("neuron", "astrocyte", "oligodendro", "glial", "microglia")),
+    (
+        "Endocrine",
+        (
+            "endocrine",
+            "islet",
+            "pancreatic a cell",
+            "type b pancreatic cell",
+            "pancreatic b cell",
+            "pancreatic d cell",
+            "pancreatic pp cell",
+            "pancreatic epsilon",
+            "enteroendocrine",
+        ),
+    ),
+    (
+        "Epithelial",
+        (
+            "epithelial",
+            "enterocyte",
+            "colonocyte",
+            "goblet",
+            "tuft",
+            "secretory",
+            "absorptive",
+            "acinar",
+            "ductal",
+            "basal",
+            "luminal",
+            "alveolar",
+            "club",
+            "ciliated",
+            "lactocyte",
+            "hepatocyte",
+            "cholangiocyte",
+        ),
+    ),
+    ("Immune", ("leukocyte", "lymphocyte", "immune cell")),
+)
+
+_B_CELL_PATTERN = re.compile(
+    r"\b(?:b cell|germinal center b cell|memory b cell|mature b cell)\b"
+)
+_T_NK_ILC_PATTERN = re.compile(
+    r"\b(?:"
+    r"t cell|"
+    r"alpha-beta t cell|"
+    r"gamma-delta t cell|"
+    r"natural killer|"
+    r"natural killer cell|"
+    r"nk cell|"
+    r"nk t cell|"
+    r"nkt cell|"
+    r"innate lymphoid|"
+    r"innate lymphoid cell"
+    r")\b"
 )
 
 
@@ -165,7 +281,7 @@ def _get_cache_dir(cache_dir: Path | None = None) -> Path:
     env = os.environ.get("SEGGER_REFERENCE_CACHE_DIR")
     if env:
         return Path(env)
-    return _DEFAULT_CACHE_DIR
+    return Path.cwd() / _DEFAULT_CACHE_DIRNAME
 
 
 def _normalize_tissue(tissue: str) -> str:
@@ -195,6 +311,24 @@ def _normalize_tissue_lenient(tissue: str) -> str:
     """Like ``_normalize_tissue`` but passes through unknown names instead of raising."""
     key = tissue.strip().lower()
     return _TISSUE_ALIASES.get(key, key)
+
+
+def _normalize_organism(organism: str) -> str:
+    """Map user organism input to Census organism values with typo correction."""
+    key = " ".join(str(organism).strip().lower().replace("_", " ").split())
+    if key in _ORGANISM_ALIASES:
+        return _ORGANISM_ALIASES[key]
+
+    close = difflib.get_close_matches(key, _ALL_KNOWN_ORGANISMS, n=5, cutoff=0.6)
+    canonical = sorted(set(_ORGANISM_ALIASES.values()))
+
+    msg = f"Unknown organism: '{organism}'."
+    if close:
+        suggestions = ", ".join(f"'{s}'" for s in close)
+        msg += f"\n  Did you mean: {suggestions}?"
+    msg += f"\n  Valid organisms: {', '.join(canonical)}"
+    msg += f"\n  Valid aliases: {', '.join(sorted(_ORGANISM_ALIASES.keys()))}"
+    raise ValueError(msg)
 
 
 def _immune_only_guess(cell_types: list[str]) -> bool:
@@ -431,6 +565,206 @@ def _build_reference_from_metadata(meta_path: Path) -> AtlasReference:
     )
 
 
+def _sorted_cell_type_counts(cell_types) -> list[tuple[str, int]]:
+    """Return cell-type counts sorted by descending abundance."""
+    counts = cell_types.value_counts(dropna=False)
+    return [(str(label), int(count)) for label, count in counts.items()]
+
+
+def _filter_cell_types_by_min_count(
+    obs_df,
+    *,
+    min_cells_per_type: int,
+):
+    """Drop cell-type groups with fewer than ``min_cells_per_type`` cells."""
+    if min_cells_per_type < 1:
+        raise ValueError("min_cells_per_type must be >= 1.")
+    if min_cells_per_type <= 1:
+        return obs_df, []
+
+    counts = _sorted_cell_type_counts(obs_df["cell_type"])
+    keep_labels = {label for label, count in counts if count >= min_cells_per_type}
+    dropped = [(label, count) for label, count in counts if count < min_cells_per_type]
+    if not dropped:
+        return obs_df, []
+
+    filtered = obs_df.loc[obs_df["cell_type"].isin(keep_labels)].copy()
+    return filtered, dropped
+
+
+def _cap_cell_type_counts(
+    counts: list[tuple[str, int]],
+    max_cell_types: int | None,
+    *,
+    include_other: bool = True,
+) -> tuple[list[str], list[tuple[str, int]]]:
+    """Reduce detailed cell types to at most ``max_cell_types`` categories.
+
+    Returns ``(kept_labels, display_counts)`` where:
+    - ``kept_labels`` are the detailed labels kept explicitly.
+    - ``display_counts`` are counts for the selected output categories
+      (including ``Other`` when ``include_other=True`` and collapsing occurs).
+    """
+    if max_cell_types is None:
+        return [label for label, _ in counts], counts
+    if max_cell_types < 1:
+        raise ValueError("max_cell_types must be >= 1 when provided.")
+    if len(counts) <= max_cell_types:
+        return [label for label, _ in counts], counts
+
+    if max_cell_types == 1:
+        if not include_other:
+            return [counts[0][0]], [counts[0]]
+        total = sum(count for _, count in counts)
+        return [], [("Other", int(total))]
+
+    if not include_other:
+        head = counts[:max_cell_types]
+        kept = [label for label, _ in head]
+        return kept, head
+
+    head = counts[: max_cell_types - 1]
+    other_count = int(sum(count for _, count in counts[max_cell_types - 1 :]))
+    display_counts = list(head)
+    if other_count > 0:
+        display_counts.append(("Other", other_count))
+    kept = [label for label, _ in head]
+    return kept, display_counts
+
+
+def _normalize_cell_type_string(cell_type: str) -> str:
+    return " ".join(str(cell_type).strip().lower().split())
+
+
+def _is_unknown_like_cell_type(cell_type: str) -> bool:
+    return _normalize_cell_type_string(cell_type) in UNKNOWN_CELL_TYPE_LABELS
+
+
+def _is_other_like_cell_type(cell_type: str) -> bool:
+    return _normalize_cell_type_string(cell_type) in OTHER_CELL_TYPE_LABELS
+
+
+def _auto_coarse_cell_type_label(cell_type: str) -> str:
+    label = _normalize_cell_type_string(cell_type)
+    if _is_unknown_like_cell_type(label):
+        return "Unknown"
+    if _is_other_like_cell_type(label):
+        return "Other"
+    if _B_CELL_PATTERN.search(label):
+        return "B cell"
+    if _T_NK_ILC_PATTERN.search(label):
+        return "T/NK/ILC"
+    for coarse_label, tokens in _AUTO_COARSE_CELL_TYPE_RULES:
+        if any(token in label for token in tokens):
+            return coarse_label
+    return "Other"
+
+
+def _build_auto_cell_type_mapping(cell_types) -> dict[str, str]:
+    labels = (
+        cell_types.astype("string")
+        .fillna("Unknown")
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    return {label: _auto_coarse_cell_type_label(label) for label in labels}
+
+
+def _cell_type_drop_mask(cell_types, *, drop_unknown: bool, drop_other: bool):
+    unknown_mask, other_mask = _cell_type_drop_breakdown(cell_types)
+    mask = unknown_mask.copy()
+    mask[:] = False
+    if drop_unknown:
+        mask = mask | unknown_mask
+    if drop_other:
+        mask = mask | other_mask
+    return mask
+
+
+def _cell_type_drop_breakdown(cell_types):
+    normalized = (
+        cell_types.astype("string")
+        .fillna("Unknown")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+    unknown_mask = normalized.isin(UNKNOWN_CELL_TYPE_LABELS)
+    other_mask = normalized.isin(OTHER_CELL_TYPE_LABELS)
+    return unknown_mask, other_mask
+
+
+def _load_cell_type_mapping(map_path: Path) -> dict[str, str]:
+    """Load a fine->coarse cell-type mapping from CSV/TSV.
+
+    Preferred column names are:
+    - fine: ``cell_type``, ``cell_type_fine``, ``fine``, ``source``, ``from``
+    - coarse: ``cell_type_coarse``, ``coarse_cell_type``, ``coarse``, ``target``, ``to``
+
+    If no known column names are present, the first two columns are used.
+    Empty coarse labels default to ``"Other"``.
+    """
+    import pandas as pd
+
+    map_path = Path(map_path)
+    if not map_path.exists():
+        raise FileNotFoundError(f"Cell-type mapping file not found: {map_path}")
+
+    read_kwargs: dict[str, str] = {}
+    if map_path.suffix.lower() in {".tsv", ".txt"}:
+        read_kwargs["sep"] = "\t"
+
+    df = pd.read_csv(map_path, **read_kwargs)
+    if df.shape[1] < 2:
+        raise ValueError(
+            f"Cell-type mapping file must have at least 2 columns: {map_path}"
+        )
+
+    name_lookup = {str(col).strip().lower(): col for col in df.columns}
+    fine_candidates = ("cell_type", "cell_type_fine", "fine", "source", "from")
+    coarse_candidates = (
+        "cell_type_coarse",
+        "coarse_cell_type",
+        "coarse",
+        "target",
+        "to",
+    )
+    fine_col = next((name_lookup[c] for c in fine_candidates if c in name_lookup), None)
+    coarse_col = next((name_lookup[c] for c in coarse_candidates if c in name_lookup), None)
+
+    if fine_col is None or coarse_col is None:
+        fine_col, coarse_col = df.columns[0], df.columns[1]
+
+    mapping: dict[str, str] = {}
+    for fine, coarse in zip(df[fine_col], df[coarse_col]):
+        if pd.isna(fine):
+            continue
+        fine_label = str(fine).strip()
+        if not fine_label:
+            continue
+        coarse_label = "Other" if pd.isna(coarse) else str(coarse).strip()
+        mapping[fine_label] = coarse_label or "Other"
+
+    if not mapping:
+        raise ValueError(
+            f"Cell-type mapping file produced an empty mapping: {map_path}"
+        )
+
+    return mapping
+
+
+def _apply_cell_type_mapping(
+    cell_types,
+    mapping: dict[str, str],
+    *,
+    unmapped_label: str = "Other",
+):
+    """Map detailed cell-type labels to coarse labels."""
+    mapped = cell_types.astype("string").fillna("Unknown").map(mapping)
+    return mapped.fillna(unmapped_label).astype("string")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -442,6 +776,13 @@ def fetch_reference(
     organism: str = "homo_sapiens",
     census_version: str = "stable",
     max_cells_per_type: int = 1000,
+    min_cells_per_type: int = 1,
+    max_cell_types: int | None = None,
+    coarse_cell_types: bool = False,
+    cell_type_map_path: Path | None = None,
+    exclude_unknown: bool = False,
+    drop_unknown_cell_types: bool = False,
+    drop_other_cell_types: bool = False,
     min_cell_types: int = 5,
     force: bool = False,
     progress: bool = False,
@@ -454,14 +795,35 @@ def fetch_reference(
         Tissue name (e.g. ``"colon"``, ``"breast"``, ``"brain"``).
         Common aliases are resolved automatically.
     cache_dir
-        Local cache directory.  Defaults to ``~/.segger/references``
-        or ``$SEGGER_REFERENCE_CACHE_DIR``.
+        Local cache directory.  Defaults to ``./.segger_references``
+        in the current working directory, or ``$SEGGER_REFERENCE_CACHE_DIR``.
     organism
-        Census organism string.
+        Census organism string. Friendly aliases and common typos are accepted
+        (for example: ``human`` -> ``homo_sapiens``, ``mouse`` -> ``mus_musculus``).
     census_version
         Census release version (``"stable"`` recommended).
     max_cells_per_type
         Maximum cells sampled per cell type (stratified).
+    min_cells_per_type
+        Minimum cells required per coarse cell-type group during metadata
+        prefiltering. Groups below this threshold are dropped before download.
+    max_cell_types
+        Optional cap on the number of output ``cell_type`` categories.
+        Keeps the most abundant categories. Tail labels are collapsed into
+        ``Other`` only when ``drop_other_cell_types=False``.
+    coarse_cell_types
+        If True, automatically map detailed labels to broad biological
+        categories (e.g. ``Epithelial``, ``Myeloid``, ``Stromal``).
+    cell_type_map_path
+        Optional CSV/TSV mapping file for biologically meaningful coarse labels.
+        If provided, Segger saves original labels as ``cell_type_fine`` and sets
+        ``cell_type`` to the mapped coarse categories (unmapped labels -> ``Other``).
+    exclude_unknown
+        If True, exclude rows where ``cell_type == 'unknown'`` at query time.
+    drop_unknown_cell_types
+        If True, remove rows labeled as ``Unknown`` from final output.
+    drop_other_cell_types
+        If True, remove rows labeled as ``Other`` from final output.
     min_cell_types
         Emit a warning if fewer unique cell types are found.
     force
@@ -473,23 +835,85 @@ def fetch_reference(
     -------
     AtlasReference
         Metadata about the cached reference, including ``h5ad_path``.
+
+    Notes
+    -----
+    Metadata-first prefiltering is enabled automatically when subsetting/coarsening
+    options require it (for example: ``max_cell_types``, ``min_cells_per_type > 1``,
+    coarse mapping, or drop filters). In that mode, Census ``get_obs`` support is
+    required so filters can be applied before matrix download.
     """
+    if max_cell_types is not None and max_cell_types < 1:
+        raise ValueError("max_cell_types must be >= 1 when provided.")
+    if min_cells_per_type < 1:
+        raise ValueError("min_cells_per_type must be >= 1.")
+
     resolved_cache = _get_cache_dir(cache_dir)
+    normalized_organism = _normalize_organism(organism)
     normalized = _normalize_tissue(tissue)
-    h5ad = _h5ad_path(resolved_cache, organism, normalized)
-    meta = _metadata_path(resolved_cache, organism, normalized)
+    h5ad = _h5ad_path(resolved_cache, normalized_organism, normalized)
+    meta = _metadata_path(resolved_cache, normalized_organism, normalized)
+    cell_type_mapping: dict[str, str] | None = None
+    resolved_map_path: Path | None = None
+    mapping_mode = "none"
+    include_other_bucket = not drop_other_cell_types
+    effective_exclude_unknown = bool(exclude_unknown or drop_unknown_cell_types)
+    requires_metadata_prefilter = bool(
+        coarse_cell_types
+        or (cell_type_map_path is not None)
+        or (min_cells_per_type > 1)
+        or (max_cell_types is not None)
+        or drop_unknown_cell_types
+        or drop_other_cell_types
+    )
+    if cell_type_map_path is not None:
+        resolved_map_path = Path(cell_type_map_path).expanduser().resolve()
+        cell_type_mapping = _load_cell_type_mapping(resolved_map_path)
+        mapping_mode = "file"
 
     # Use cache if present and not forcing
     if not force and h5ad.exists() and meta.exists():
+        cache_meta = _load_metadata(meta)
+        cache_matches = (
+            cache_meta.get("census_version", "stable") == census_version
+            and cache_meta.get("max_cell_types", None) == max_cell_types
+            and bool(cache_meta.get("coarse_cell_types", False)) == bool(coarse_cell_types)
+            and bool(
+                cache_meta.get(
+                    "effective_exclude_unknown",
+                    cache_meta.get("exclude_unknown", False),
+                )
+            ) == effective_exclude_unknown
+            and bool(cache_meta.get("drop_unknown_cell_types", False)) == bool(drop_unknown_cell_types)
+            and bool(cache_meta.get("drop_other_cell_types", False)) == bool(drop_other_cell_types)
+            and bool(cache_meta.get("metadata_prefiltered", False)) == bool(requires_metadata_prefilter)
+            and cache_meta.get("max_cells_per_type", max_cells_per_type) == max_cells_per_type
+            and cache_meta.get("min_cells_per_type", min_cells_per_type) == min_cells_per_type
+            and cache_meta.get("cell_type_map_path", None) == (
+                str(resolved_map_path) if resolved_map_path is not None else None
+            )
+        )
+        if cache_matches:
+            if progress:
+                print(f"[atlas] Using cached reference: {h5ad}", flush=True)
+            return _build_reference_from_metadata(meta)
         if progress:
-            print(f"[atlas] Using cached reference: {h5ad}", flush=True)
-        return _build_reference_from_metadata(meta)
+            print(
+                "[atlas] Cache exists but fetch options changed; rebuilding reference.",
+                flush=True,
+            )
 
     census = _require_census()
 
     # Query Census
     import anndata as _ad
     import numpy as np
+
+    raw_counts_preview: list[tuple[str, int]] | None = None
+    selected_counts_preview: list[tuple[str, int]] | None = None
+    selected_type_set: set[str] | None = None
+    dropped_small_cell_types: list[tuple[str, int]] = []
+    metadata_prefiltered = False
 
     with _progress_spinner("Opening CellxGENE Census", enabled=progress):
         census_handle = _open_census(census, census_version=census_version)
@@ -501,29 +925,104 @@ def fetch_reference(
             f"and is_primary_data == True "
             f"and disease == 'normal'"
         )
+        if effective_exclude_unknown:
+            value_filter += " and cell_type != 'unknown'"
 
         obs_df = None
         with _progress_spinner("Querying candidate cell metadata", enabled=progress):
             obs_df = _get_obs_compat(
                 census,
                 c,
-                organism=organism,
+                organism=normalized_organism,
                 value_filter=value_filter,
             )
 
-        if obs_df is not None:
+        if obs_df is None:
+            if requires_metadata_prefilter:
+                raise RuntimeError(
+                    "Metadata-first atlas fetch requires cellxgene-census get_obs support. "
+                    "This client version cannot prefilter by metadata before matrix download. "
+                    "Upgrade cellxgene-census and retry."
+                )
+            with _progress_spinner("Querying and downloading reference", enabled=progress):
+                adata: _ad.AnnData = _get_anndata_compat(
+                    census,
+                    c,
+                    organism=normalized_organism,
+                    obs_value_filter=value_filter,
+                )
+        else:
             if "soma_joinid" not in obs_df.columns:
                 obs_df = obs_df.reset_index()
-            if "soma_joinid" in obs_df.columns and "cell_type" in obs_df.columns:
+            if "soma_joinid" not in obs_df.columns or "cell_type" not in obs_df.columns:
+                if requires_metadata_prefilter:
+                    raise RuntimeError(
+                        "Metadata-first atlas fetch requires get_obs columns "
+                        "['soma_joinid', 'cell_type']."
+                    )
+                with _progress_spinner("Querying and downloading reference", enabled=progress):
+                    adata: _ad.AnnData = _get_anndata_compat(
+                        census,
+                        c,
+                        organism=normalized_organism,
+                        obs_value_filter=value_filter,
+                    )
+            else:
+                metadata_prefiltered = True
                 obs_df["cell_type"] = (
                     obs_df["cell_type"].astype("string").fillna("Unknown")
                 )
+                if cell_type_mapping is None and coarse_cell_types:
+                    cell_type_mapping = _build_auto_cell_type_mapping(obs_df["cell_type"])
+                    mapping_mode = "auto"
+                if cell_type_mapping is not None:
+                    obs_df["cell_type_fine"] = obs_df["cell_type"]
+                    obs_df["cell_type"] = _apply_cell_type_mapping(
+                        obs_df["cell_type"],
+                        cell_type_mapping,
+                    )
+                drop_mask = _cell_type_drop_mask(
+                    obs_df["cell_type"],
+                    drop_unknown=drop_unknown_cell_types,
+                    drop_other=drop_other_cell_types,
+                )
+                if bool(drop_mask.any()):
+                    obs_df = obs_df.loc[~drop_mask].copy()
                 if len(obs_df) == 0:
                     raise ValueError(
-                        f"No cells found in CellxGENE Census for tissue_general='{normalized}'. "
+                        f"No cells left after cell-type filtering for tissue_general='{normalized}'. "
                         f"Original query tissue: '{tissue}'. "
                         f"Try `segger atlas fetch --help` or check CellxGENE Census documentation."
                     )
+                obs_df, dropped_small_cell_types = _filter_cell_types_by_min_count(
+                    obs_df,
+                    min_cells_per_type=min_cells_per_type,
+                )
+                if len(obs_df) == 0:
+                    raise ValueError(
+                        f"No cells left after enforcing min_cells_per_type={min_cells_per_type} "
+                        f"for tissue_general='{normalized}'."
+                    )
+                raw_counts_preview = _sorted_cell_type_counts(obs_df["cell_type"])
+                kept_labels, selected_counts_preview = _cap_cell_type_counts(
+                    raw_counts_preview,
+                    max_cell_types,
+                    include_other=include_other_bucket,
+                )
+                if max_cell_types is not None and len(raw_counts_preview) > max_cell_types:
+                    selected_type_set = set(kept_labels)
+                    if include_other_bucket:
+                        if selected_type_set:
+                            obs_df["cell_type"] = obs_df["cell_type"].where(
+                                obs_df["cell_type"].isin(selected_type_set),
+                                other="Other",
+                            )
+                        else:
+                            obs_df["cell_type"] = "Other"
+                    else:
+                        obs_df = obs_df.loc[
+                            obs_df["cell_type"].isin(selected_type_set)
+                        ].copy()
                 rng = np.random.default_rng(42)
                 sampled_joinids: list[int] = []
                 for _, group in obs_df.groupby("cell_type", dropna=False):
@@ -540,26 +1039,10 @@ def fetch_reference(
                     adata: _ad.AnnData = _get_anndata_compat(
                         census,
                         c,
-                        organism=organism,
+                        organism=normalized_organism,
                         obs_value_filter=None,
                         obs_coords=sampled_joinids,
                     )
-            else:
-                with _progress_spinner("Querying and downloading reference", enabled=progress):
-                    adata: _ad.AnnData = _get_anndata_compat(
-                        census,
-                        c,
-                        organism=organism,
-                        obs_value_filter=value_filter,
-                    )
-        else:
-            with _progress_spinner("Querying and downloading reference", enabled=progress):
-                adata: _ad.AnnData = _get_anndata_compat(
-                    census,
-                    c,
-                    organism=organism,
-                    obs_value_filter=value_filter,
-                )
 
     if adata.n_obs == 0:
         raise ValueError(
@@ -569,9 +1052,96 @@ def fetch_reference(
         )
 
     # Standardize cell_type column
+    n_obs_downloaded = int(adata.n_obs)
+    dropped_unknown_cells = 0
+    dropped_other_cells = 0
     adata.obs["cell_type"] = (
-        adata.obs["cell_type"].astype("string").fillna("Unknown").astype("category")
+        adata.obs["cell_type"].astype("string").fillna("Unknown")
     )
+    if cell_type_mapping is None and coarse_cell_types:
+        cell_type_mapping = _build_auto_cell_type_mapping(adata.obs["cell_type"])
+        mapping_mode = "auto"
+    if cell_type_mapping is not None:
+        adata.obs["cell_type_fine"] = adata.obs["cell_type"]
+        adata.obs["cell_type"] = _apply_cell_type_mapping(
+            adata.obs["cell_type"],
+            cell_type_mapping,
+        )
+    unknown_mask, other_mask = _cell_type_drop_breakdown(adata.obs["cell_type"])
+    adata_drop_mask = (unknown_mask if drop_unknown_cell_types else (unknown_mask & False)) | (
+        other_mask if drop_other_cell_types else (other_mask & False)
+    )
+    dropped_unknown_cells += int(unknown_mask.sum()) if drop_unknown_cell_types else 0
+    dropped_other_cells += int(other_mask.sum()) if drop_other_cell_types else 0
+    if bool(adata_drop_mask.any()):
+        adata = adata[~adata_drop_mask.to_numpy()].copy()
+    if adata.n_obs == 0:
+        raise ValueError(
+            "All cells were removed by cell-type filters "
+            f"(drop_unknown_cell_types={drop_unknown_cell_types}, "
+            f"drop_other_cell_types={drop_other_cell_types})."
+        )
+
+    # If preselection happened on metadata, enforce the same collapsing here.
+    if selected_type_set is not None:
+        if include_other_bucket:
+            if selected_type_set:
+                adata.obs["cell_type"] = adata.obs["cell_type"].where(
+                    adata.obs["cell_type"].isin(selected_type_set),
+                    other="Other",
+                )
+            else:
+                adata.obs["cell_type"] = "Other"
+        else:
+            adata = adata[adata.obs["cell_type"].isin(selected_type_set)].copy()
+    elif max_cell_types is not None:
+        raw_counts_preview = _sorted_cell_type_counts(adata.obs["cell_type"])
+        kept_labels, selected_counts_preview = _cap_cell_type_counts(
+            raw_counts_preview,
+            max_cell_types,
+            include_other=include_other_bucket,
+        )
+        if len(raw_counts_preview) > max_cell_types:
+            selected_type_set = set(kept_labels)
+            if include_other_bucket:
+                if selected_type_set:
+                    adata.obs["cell_type"] = adata.obs["cell_type"].where(
+                        adata.obs["cell_type"].isin(selected_type_set),
+                        other="Other",
+                    )
+                else:
+                    adata.obs["cell_type"] = "Other"
+            else:
+                adata = adata[adata.obs["cell_type"].isin(selected_type_set)].copy()
+
+    # Re-apply Unknown/Other dropping after any max-cell-type collapsing.
+    unknown_mask, other_mask = _cell_type_drop_breakdown(adata.obs["cell_type"])
+    adata_drop_mask = (unknown_mask if drop_unknown_cell_types else (unknown_mask & False)) | (
+        other_mask if drop_other_cell_types else (other_mask & False)
+    )
+    dropped_unknown_cells += int(unknown_mask.sum()) if drop_unknown_cell_types else 0
+    dropped_other_cells += int(other_mask.sum()) if drop_other_cell_types else 0
+    if bool(adata_drop_mask.any()):
+        adata = adata[~adata_drop_mask.to_numpy()].copy()
+    if adata.n_obs == 0:
+        raise ValueError("All cells were removed after max_cell_types and drop filters.")
+
+    kept_fraction = (
+        float(adata.n_obs) / float(n_obs_downloaded)
+        if n_obs_downloaded > 0
+        else 0.0
+    )
+    if drop_other_cell_types and kept_fraction < 0.5:
+        import warnings
+        warnings.warn(
+            "More than 50% of cells were dropped after coarse mapping/filtering. "
+            "Consider reviewing the coarse mapping mode or disabling "
+            "drop_other_cell_types for this tissue.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    adata.obs["cell_type"] = adata.obs["cell_type"].astype("category")
     cell_types = sorted(adata.obs["cell_type"].cat.categories.tolist())
 
     if len(cell_types) < min_cell_types:
@@ -621,7 +1191,7 @@ def fetch_reference(
     metadata = {
         "h5ad_path": str(h5ad),
         "tissue": normalized,
-        "organism": organism,
+        "organism": normalized_organism,
         "census_version": census_version,
         "n_obs": int(adata.n_obs),
         "n_cell_types": len(final_types),
@@ -629,6 +1199,34 @@ def fetch_reference(
         "immune_only": immune_only,
         "cell_type_preview": final_types[:30],
         "max_cells_per_type": max_cells_per_type,
+        "min_cells_per_type": min_cells_per_type,
+        "max_cell_types": max_cell_types,
+        "coarse_cell_types": bool(coarse_cell_types),
+        "exclude_unknown": bool(exclude_unknown),
+        "effective_exclude_unknown": bool(effective_exclude_unknown),
+        "drop_unknown_cell_types": bool(drop_unknown_cell_types),
+        "drop_other_cell_types": bool(drop_other_cell_types),
+        "metadata_prefiltered": bool(metadata_prefiltered),
+        "n_obs_downloaded": int(n_obs_downloaded),
+        "dropped_unknown_cells": int(dropped_unknown_cells),
+        "dropped_other_cells": int(dropped_other_cells),
+        "kept_fraction": float(kept_fraction),
+        "coarse_mapping_mode": mapping_mode,
+        "cell_type_map_path": (
+            str(resolved_map_path) if resolved_map_path is not None else None
+        ),
+        "uses_cell_type_mapping": bool(cell_type_mapping is not None),
+        "raw_n_cell_types": (
+            len(raw_counts_preview) if raw_counts_preview is not None else len(final_types)
+        ),
+        "selected_cell_type_preview": (
+            [name for name, _ in selected_counts_preview[:30]]
+            if selected_counts_preview is not None
+            else final_types[:30]
+        ),
+        "dropped_small_cell_types_preview": (
+            [name for name, _ in dropped_small_cell_types[:30]]
+        ),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     _write_metadata(meta, metadata)
@@ -637,13 +1235,145 @@ def fetch_reference(
         h5ad_path=h5ad,
         metadata_path=meta,
         tissue=normalized,
-        organism=organism,
+        organism=normalized_organism,
         census_version=census_version,
         n_obs=int(adata.n_obs),
         n_cell_types=len(final_types),
         cell_type_column="cell_type",
         immune_only=immune_only,
     )
+
+
+def preview_reference_cell_types(
+    tissue: str,
+    *,
+    organism: str = "homo_sapiens",
+    census_version: str = "stable",
+    min_cells_per_type: int = 1,
+    max_cell_types: int | None = None,
+    coarse_cell_types: bool = False,
+    cell_type_map_path: Path | None = None,
+    exclude_unknown: bool = False,
+    drop_unknown_cell_types: bool = False,
+    drop_other_cell_types: bool = False,
+    top_n: int = 30,
+    progress: bool = False,
+) -> dict:
+    """Preview candidate tissue cell types from Census without downloading matrix."""
+    if max_cell_types is not None and max_cell_types < 1:
+        raise ValueError("max_cell_types must be >= 1 when provided.")
+    if top_n < 1:
+        raise ValueError("top_n must be >= 1.")
+    if min_cells_per_type < 1:
+        raise ValueError("min_cells_per_type must be >= 1.")
+
+    normalized = _normalize_tissue(tissue)
+    normalized_organism = _normalize_organism(organism)
+    census = _require_census()
+    cell_type_mapping: dict[str, str] | None = None
+    resolved_map_path: Path | None = None
+    mapping_mode = "none"
+    include_other_bucket = not drop_other_cell_types
+    effective_exclude_unknown = bool(exclude_unknown or drop_unknown_cell_types)
+    if cell_type_map_path is not None:
+        resolved_map_path = Path(cell_type_map_path).expanduser().resolve()
+        cell_type_mapping = _load_cell_type_mapping(resolved_map_path)
+        mapping_mode = "file"
+
+    with _progress_spinner("Opening CellxGENE Census", enabled=progress):
+        census_handle = _open_census(census, census_version=census_version)
+
+    with census_handle as c:
+        value_filter = (
+            f"tissue_general == '{normalized}' "
+            f"and is_primary_data == True "
+            f"and disease == 'normal'"
+        )
+        if effective_exclude_unknown:
+            value_filter += " and cell_type != 'unknown'"
+        with _progress_spinner("Querying candidate cell metadata", enabled=progress):
+            obs_df = _get_obs_compat(
+                census,
+                c,
+                organism=normalized_organism,
+                value_filter=value_filter,
+            )
+
+    if obs_df is None or "cell_type" not in obs_df.columns:
+        raise RuntimeError(
+            "Could not preview cell types quickly because this cellxgene-census "
+            "version does not expose get_obs with cell_type metadata."
+        )
+
+    obs_df["cell_type"] = obs_df["cell_type"].astype("string").fillna("Unknown")
+    if cell_type_mapping is None and coarse_cell_types:
+        cell_type_mapping = _build_auto_cell_type_mapping(obs_df["cell_type"])
+        mapping_mode = "auto"
+    if cell_type_mapping is not None:
+        obs_df["cell_type"] = _apply_cell_type_mapping(
+            obs_df["cell_type"],
+            cell_type_mapping,
+        )
+    n_cells_before_drop = int(len(obs_df))
+    unknown_mask, other_mask = _cell_type_drop_breakdown(obs_df["cell_type"])
+    dropped_unknown_cells = int(unknown_mask.sum()) if drop_unknown_cell_types else 0
+    dropped_other_cells = int(other_mask.sum()) if drop_other_cell_types else 0
+    drop_mask = (unknown_mask if drop_unknown_cell_types else (unknown_mask & False)) | (
+        other_mask if drop_other_cell_types else (other_mask & False)
+    )
+    if bool(drop_mask.any()):
+        obs_df = obs_df.loc[~drop_mask].copy()
+    obs_df, dropped_small_cell_types = _filter_cell_types_by_min_count(
+        obs_df,
+        min_cells_per_type=min_cells_per_type,
+    )
+    if len(obs_df) == 0:
+        raise ValueError(
+            "No cells left after cell-type filtering in preview mode. "
+            "Adjust drop_unknown_cell_types/drop_other_cell_types/min_cells_per_type if needed."
+        )
+    kept_fraction = (
+        float(len(obs_df)) / float(n_cells_before_drop)
+        if n_cells_before_drop > 0
+        else 0.0
+    )
+    counts = _sorted_cell_type_counts(obs_df["cell_type"])
+    kept_labels, selected_counts = _cap_cell_type_counts(
+        counts,
+        max_cell_types,
+        include_other=include_other_bucket,
+    )
+    selected_categories = [name for name, _ in selected_counts]
+
+    return {
+        "tissue": normalized,
+        "organism": normalized_organism,
+        "census_version": census_version,
+        "n_cells": int(len(obs_df)),
+        "n_cells_before_drop": int(n_cells_before_drop),
+        "n_raw_cell_types": int(len(counts)),
+        "min_cells_per_type": int(min_cells_per_type),
+        "coarse_cell_types": bool(coarse_cell_types),
+        "exclude_unknown": bool(exclude_unknown),
+        "effective_exclude_unknown": bool(effective_exclude_unknown),
+        "drop_unknown_cell_types": bool(drop_unknown_cell_types),
+        "drop_other_cell_types": bool(drop_other_cell_types),
+        "metadata_prefiltered": True,
+        "dropped_unknown_cells": int(dropped_unknown_cells),
+        "dropped_other_cells": int(dropped_other_cells),
+        "kept_fraction": float(kept_fraction),
+        "raw_top_cell_types": counts[:top_n],
+        "max_cell_types": max_cell_types,
+        "uses_cell_type_mapping": bool(cell_type_mapping is not None),
+        "coarse_mapping_mode": mapping_mode,
+        "cell_type_map_path": (
+            str(resolved_map_path) if resolved_map_path is not None else None
+        ),
+        "selected_cell_type_categories": selected_categories,
+        "selected_cell_type_counts": selected_counts,
+        "kept_detailed_labels": kept_labels,
+        "dropped_small_cell_types": dropped_small_cell_types,
+    }
 
 
 def resolve_reference(

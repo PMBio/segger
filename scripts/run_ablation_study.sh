@@ -11,14 +11,14 @@ set -u -o pipefail
 #   bash scripts/run_ablation_study.sh
 #
 # Optional overrides (environment variables):
-#   INPUT_DIR=data/xe_pancreas_mossi/
+#   INPUT_DIR=./data/xe_crc_segkit/
 #   OUTPUT_ROOT=./results/mossi_ablation_study
 #   NUM_GPUS=<auto>            # Override auto-detected GPU count
 #   N_EPOCHS=20
 #   RESUME_IF_EXISTS=1
 #   DRY_RUN=0
 #   SEGMENT_TIMEOUT_MIN=90
-#   ALIGNMENT_SCRNA_REFERENCE_PATH=data/ref_pancreas.h5ad
+#   ALIGNMENT_SCRNA_REFERENCE_PATH=./data/MUI_Innsbruck-adata.h5ad
 #   ALIGNMENT_SCRNA_CELLTYPE_COLUMN=cell_type
 #   SEGMENT_NUM_WORKERS=8
 #   SEGMENT_ANC_RETRY_WORKERS=0
@@ -31,8 +31,12 @@ set -u -o pipefail
 #   RUN_SGLOSS_ABLATION=1
 #   RUN_ALIGNMENT_SWEEP=1
 #   RUN_ARCH_ABLATION=1
+#   RUN_GRAPH_ABLATION=1
+#   RUN_SCALE_ABLATION=1
+#   RUN_3D_ABLATION=1
 #   RUN_PREDICTION_ABLATION=1
-#   RUN_LR_ABLATION=1
+#   RUN_FRAGMENT_ABLATION=1
+#   RUN_LR_ABLATION=0         # Legacy/off by default
 # -------------------------------------------------------------------------
 
 timestamp() {
@@ -70,14 +74,14 @@ fi
 # -------------------------------------------------------------------------
 # Paths and defaults
 # -------------------------------------------------------------------------
-DEFAULT_INPUT_DIR="data/xe_pancreas_mossi/"
+DEFAULT_INPUT_DIR="./data/xe_crc_segkit/"
 INPUT_DIR="${INPUT_DIR:-${DEFAULT_INPUT_DIR}}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-./results/mossi_ablation_study}"
 
 if [[ "${INPUT_DIR}" == "${DEFAULT_INPUT_DIR}" ]] && \
    [[ ! -d "${INPUT_DIR}" ]] && \
-   [[ -d "../data/xe_pancreas_mossi/" ]]; then
-  INPUT_DIR="../data/xe_pancreas_mossi/"
+   [[ -d "../data/xe_crc_segkit/" ]]; then
+  INPUT_DIR="../data/xe_crc_segkit/"
 fi
 
 N_EPOCHS="${N_EPOCHS:-20}"
@@ -99,20 +103,20 @@ TORCH_SHARING_STRATEGY="${TORCH_SHARING_STRATEGY:-file_system}"
 # Alignment defaults (needed by anchor and alignment sweep).
 ALIGNMENT_LOSS_WEIGHT_START="${ALIGNMENT_LOSS_WEIGHT_START:-0.0}"
 ALIGNMENT_ME_GENE_PAIRS_PATH="${ALIGNMENT_ME_GENE_PAIRS_PATH:-}"
-ALIGNMENT_SCRNA_REFERENCE_PATH="${ALIGNMENT_SCRNA_REFERENCE_PATH:-data/ref_pancreas.h5ad}"
+ALIGNMENT_SCRNA_REFERENCE_PATH="${ALIGNMENT_SCRNA_REFERENCE_PATH:-./data/MUI_Innsbruck-adata.h5ad}"
 ALIGNMENT_SCRNA_CELLTYPE_COLUMN="${ALIGNMENT_SCRNA_CELLTYPE_COLUMN:-cell_type}"
 
-if [[ "${ALIGNMENT_SCRNA_REFERENCE_PATH}" == "data/ref_pancreas.h5ad" ]] && \
+if [[ "${ALIGNMENT_SCRNA_REFERENCE_PATH}" == "./data/MUI_Innsbruck-adata.h5ad" ]] && \
    [[ ! -f "${ALIGNMENT_SCRNA_REFERENCE_PATH}" ]] && \
-   [[ -f "../data/ref_pancreas.h5ad" ]]; then
-  ALIGNMENT_SCRNA_REFERENCE_PATH="../data/ref_pancreas.h5ad"
+   [[ -f "../data/MUI_Innsbruck-adata.h5ad" ]]; then
+  ALIGNMENT_SCRNA_REFERENCE_PATH="../data/MUI_Innsbruck-adata.h5ad"
 fi
 
 # -------------------------------------------------------------------------
 # Anchor configuration (defaults matching current best config)
 # Expansion is interpreted as multiplicative scale factor.
 # -------------------------------------------------------------------------
-ANCHOR_USE_3D="${ANCHOR_USE_3D:-true}"
+ANCHOR_USE_3D="${ANCHOR_USE_3D:-false}"
 ANCHOR_EXPANSION="${ANCHOR_EXPANSION:-2.2}"
 ANCHOR_TX_K="${ANCHOR_TX_K:-5}"
 ANCHOR_TX_DIST="${ANCHOR_TX_DIST:-20}"
@@ -120,7 +124,7 @@ ANCHOR_N_LAYERS="${ANCHOR_N_LAYERS:-2}"
 ANCHOR_N_HEADS="${ANCHOR_N_HEADS:-4}"
 ANCHOR_CELLS_MIN="${ANCHOR_CELLS_MIN:-5}"
 ANCHOR_MIN_QV="${ANCHOR_MIN_QV:-0}"
-ANCHOR_ALIGNMENT="${ANCHOR_ALIGNMENT:-true}"
+ANCHOR_ALIGNMENT="${ANCHOR_ALIGNMENT:-false}"
 ANCHOR_SG_LOSS="${ANCHOR_SG_LOSS:-triplet}"
 ANCHOR_HIDDEN="${ANCHOR_HIDDEN:-64}"
 ANCHOR_OUT="${ANCHOR_OUT:-64}"
@@ -131,6 +135,7 @@ ANCHOR_ALIGN_WEIGHT="${ANCHOR_ALIGN_WEIGHT:-0.03}"
 ANCHOR_POS_EMB="${ANCHOR_POS_EMB:-true}"
 ANCHOR_NORM_EMB="${ANCHOR_NORM_EMB:-true}"
 ANCHOR_CELLS_REP="${ANCHOR_CELLS_REP:-pca}"
+ANCHOR_FRAGMENT_MODE="${ANCHOR_FRAGMENT_MODE:-false}"
 ANCHOR_LR="${ANCHOR_LR:-1e-3}"
 
 echo "[$(timestamp)] Expansion mode: scale_factor"
@@ -143,8 +148,12 @@ RUN_LOSS_ABLATION="${RUN_LOSS_ABLATION:-1}"
 RUN_SGLOSS_ABLATION="${RUN_SGLOSS_ABLATION:-1}"
 RUN_ALIGNMENT_SWEEP="${RUN_ALIGNMENT_SWEEP:-1}"
 RUN_ARCH_ABLATION="${RUN_ARCH_ABLATION:-1}"
+RUN_GRAPH_ABLATION="${RUN_GRAPH_ABLATION:-1}"
+RUN_SCALE_ABLATION="${RUN_SCALE_ABLATION:-1}"
+RUN_3D_ABLATION="${RUN_3D_ABLATION:-1}"
 RUN_PREDICTION_ABLATION="${RUN_PREDICTION_ABLATION:-1}"
-RUN_LR_ABLATION="${RUN_LR_ABLATION:-1}"
+RUN_FRAGMENT_ABLATION="${RUN_FRAGMENT_ABLATION:-1}"
+RUN_LR_ABLATION="${RUN_LR_ABLATION:-0}"
 
 # -------------------------------------------------------------------------
 # Directories
@@ -264,8 +273,14 @@ job_block() {
     abl_sg_*|abl_full) echo "loss_decomposition" ;;
     abl_sgloss_*) echo "sg_loss_type" ;;
     abl_aw_*) echo "alignment_sweep" ;;
-    abl_depth_*|abl_width_*|abl_heads_*|abl_no_pos|abl_no_norm|abl_morph) echo "architecture" ;;
+    abl_txk_*|abl_txdist_*|abl_graph_*) echo "graph_topology" ;;
+    abl_scale_*) echo "scale_factor" ;;
+    abl_use3d_*) echo "use_3d" ;;
+    abl_depth_*|abl_net_*) echo "gnn_capacity" ;;
+    abl_heads_*) echo "attention" ;;
+    abl_no_pos|abl_no_norm|abl_morph) echo "feature_encoding" ;;
     abl_pred_*) echo "prediction_mode" ;;
+    abl_frag_*) echo "fragments" ;;
     abl_lr_*) echo "learning_rate" ;;
     *) echo "other" ;;
   esac
@@ -316,11 +331,11 @@ build_jobs() {
       "0" "0" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
       "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
 
-    # full (anchor baseline)
+    # full loss stack (forces alignment on, even though the anchor defaults stay off)
     add_job "abl_full" \
       "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
       "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
-      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "true" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
       "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
       "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
   fi
@@ -368,7 +383,7 @@ build_jobs() {
   fi
 
   # -------------------------------------------------------------------
-  # Block D: Architecture ablation (10 jobs)
+  # Block D: Architecture + encoder ablation
   # -------------------------------------------------------------------
   if [[ "${RUN_ARCH_ABLATION}" == "1" ]]; then
     # Depth: 0, 1, 3 mid layers
@@ -381,18 +396,30 @@ build_jobs() {
         "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
     done
 
-    # Width: 32/32 and 128/128
-    for width in 32 128; do
-      add_job "abl_width_${width}" \
-        "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
-        "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
-        "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${width}" "${width}" \
-        "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
-        "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
-    done
+    # Explicit learnable-parameter tiers: nano / medium / big.
+    add_job "abl_net_nano" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
+      "1" "2" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "32" "32" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
 
-    # Heads: 1 and 8
-    for heads in 1 8; do
+    add_job "abl_net_medium" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
+      "2" "4" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "64" "64" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    add_job "abl_net_big" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
+      "3" "8" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "128" "128" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    # Heads: single-head, lighter multi-head, and larger multi-head variants
+    for heads in 1 2 6 8; do
       add_job "abl_heads_${heads}" \
         "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
         "${ANCHOR_N_LAYERS}" "${heads}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
@@ -427,10 +454,95 @@ build_jobs() {
   fi
 
   # -------------------------------------------------------------------
-  # Block E: Prediction mode (2 jobs)
+  # Block E: Graph topology ablation
+  # -------------------------------------------------------------------
+  if [[ "${RUN_GRAPH_ABLATION}" == "1" ]]; then
+    add_job "abl_txk_3" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "3" "${ANCHOR_TX_DIST}" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    add_job "abl_txk_10" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "10" "${ANCHOR_TX_DIST}" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    add_job "abl_txdist_10" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "10" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    add_job "abl_txdist_30" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "30" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    add_job "abl_graph_local" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "3" "10" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    add_job "abl_graph_dense" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "10" "30" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+  fi
+
+  # -------------------------------------------------------------------
+  # Block F: Scale-factor ablation
+  # -------------------------------------------------------------------
+  if [[ "${RUN_SCALE_ABLATION}" == "1" ]]; then
+    add_job "abl_scale_1p5" \
+      "${ANCHOR_USE_3D}" "1.5" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    add_job "abl_scale_3p0" \
+      "${ANCHOR_USE_3D}" "3.0" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+  fi
+
+  # -------------------------------------------------------------------
+  # Block G: 3D-mode ablation
+  # -------------------------------------------------------------------
+  if [[ "${RUN_3D_ABLATION}" == "1" ]]; then
+    add_job "abl_use3d_false" \
+      "false" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    add_job "abl_use3d_true" \
+      "true" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+  fi
+
+  # -------------------------------------------------------------------
+  # Block H: Prediction mode
   # -------------------------------------------------------------------
   if [[ "${RUN_PREDICTION_ABLATION}" == "1" ]]; then
-    add_job "abl_pred_cell" \
+    add_job "abl_pred_nucleus" \
       "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
       "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
       "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
@@ -446,7 +558,26 @@ build_jobs() {
   fi
 
   # -------------------------------------------------------------------
-  # Block F: Learning rate (3 jobs)
+  # Block I: Fragment grouping
+  # -------------------------------------------------------------------
+  if [[ "${RUN_FRAGMENT_ABLATION}" == "1" ]]; then
+    add_job "abl_frag_off" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+
+    add_job "abl_frag_on" \
+      "${ANCHOR_USE_3D}" "${ANCHOR_EXPANSION}" "${ANCHOR_TX_K}" "${ANCHOR_TX_DIST}" \
+      "${ANCHOR_N_LAYERS}" "${ANCHOR_N_HEADS}" "${ANCHOR_CELLS_MIN}" "${ANCHOR_MIN_QV}" \
+      "${ANCHOR_ALIGNMENT}" "${ANCHOR_SG_LOSS}" "${ANCHOR_HIDDEN}" "${ANCHOR_OUT}" \
+      "${ANCHOR_TX_WEIGHT}" "${ANCHOR_BD_WEIGHT}" "${ANCHOR_SG_WEIGHT}" "${ANCHOR_ALIGN_WEIGHT}" \
+      "${ANCHOR_POS_EMB}" "${ANCHOR_NORM_EMB}" "${ANCHOR_CELLS_REP}" "${ANCHOR_LR}"
+  fi
+
+  # -------------------------------------------------------------------
+  # Block J: Legacy learning rate sweep (3 jobs, off by default)
   # -------------------------------------------------------------------
   if [[ "${RUN_LR_ABLATION}" == "1" ]]; then
     add_job "abl_lr_3e4" \
@@ -632,6 +763,43 @@ run_exports_for_job() {
   return 0
 }
 
+job_outputs_complete() {
+  local spec="$1"
+  local job_name
+  IFS='|' read -r job_name _ <<< "${spec}"
+
+  [[ -f "${RUNS_DIR}/${job_name}/segger_segmentation.parquet" ]] || return 1
+  [[ -f "${EXPORTS_DIR}/${job_name}/anndata/segger_segmentation.h5ad" ]] || return 1
+  [[ -f "${EXPORTS_DIR}/${job_name}/xenium_explorer/seg_experiment.xenium" ]] || return 1
+  return 0
+}
+
+write_skipped_existing_summary() {
+  local out_file="$1"
+  shift
+  local -a indices=("$@")
+  local idx spec job_name
+
+  if [[ "${#indices[@]}" -eq 0 ]]; then
+    rm -f "${out_file}"
+    return 0
+  fi
+
+  printf "job\tgpu\tstatus\telapsed_s\tseg_dir\tlog_file\n" > "${out_file}"
+  for idx in "${indices[@]}"; do
+    spec="${JOB_SPECS[$idx]}"
+    IFS='|' read -r job_name _ <<< "${spec}"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+      "${job_name}" \
+      "-" \
+      "skipped_existing" \
+      "0" \
+      "${RUNS_DIR}/${job_name}" \
+      "${LOGS_DIR}/${job_name}.gpu?.log" \
+      >> "${out_file}"
+  done
+}
+
 # =========================================================================
 # run_job — extended to handle 21-field spec
 # =========================================================================
@@ -653,11 +821,16 @@ run_job() {
     positional_embeddings normalize_embeddings cells_representation learning_rate \
     <<< "${spec}"
 
-  # Resolve prediction mode from job name (Block E override).
+  # Resolve job-specific prediction/fragment modes from job name.
   local job_prediction_mode="${PREDICTION_MODE}"
+  local job_fragment_mode="${ANCHOR_FRAGMENT_MODE}"
   case "${job_name}" in
-    abl_pred_cell) job_prediction_mode="cell" ;;
+    abl_pred_nucleus) job_prediction_mode="nucleus" ;;
     abl_pred_uniform) job_prediction_mode="uniform" ;;
+  esac
+  case "${job_name}" in
+    abl_frag_off) job_fragment_mode="false" ;;
+    abl_frag_on) job_fragment_mode="true" ;;
   esac
 
   local seg_dir="${RUNS_DIR}/${job_name}"
@@ -673,7 +846,7 @@ run_job() {
   {
     echo "=================================================================="
     echo "[$(timestamp)] START job=${job_name} gpu=${gpu}"
-    echo "params: use3d=${use_3d} expansion_scale=${expansion} tx_k=${tx_k} tx_dist=${tx_dist} layers=${n_layers} heads=${n_heads} cells_min=${cells_min_counts} min_qv=${min_qv} align=${alignment_loss} sg_loss=${sg_loss_type} hidden=${hidden_channels} out=${out_channels} tx_w=${tx_weight_end} bd_w=${bd_weight_end} sg_w=${sg_weight_end} align_w=${alignment_weight_end} pos_emb=${positional_embeddings} norm_emb=${normalize_embeddings} cells_rep=${cells_representation} lr=${learning_rate} pred_mode=${job_prediction_mode} timeout_min=${SEGMENT_TIMEOUT_MIN}"
+    echo "params: use3d=${use_3d} expansion_scale=${expansion} tx_k=${tx_k} tx_dist=${tx_dist} layers=${n_layers} heads=${n_heads} cells_min=${cells_min_counts} min_qv=${min_qv} align=${alignment_loss} sg_loss=${sg_loss_type} hidden=${hidden_channels} out=${out_channels} tx_w=${tx_weight_end} bd_w=${bd_weight_end} sg_w=${sg_weight_end} align_w=${alignment_weight_end} pos_emb=${positional_embeddings} norm_emb=${normalize_embeddings} cells_rep=${cells_representation} lr=${learning_rate} pred_mode=${job_prediction_mode} fragment_mode=${job_fragment_mode} timeout_min=${SEGMENT_TIMEOUT_MIN}"
   } | tee -a "${log_file}" >/dev/null
 
   if [[ "${RESUME_IF_EXISTS}" == "1" ]] && \
@@ -694,6 +867,10 @@ run_job() {
     local norm_flag="--normalize-embeddings"
     if [[ "${normalize_embeddings}" == "false" ]]; then
       norm_flag="--no-normalize-embeddings"
+    fi
+    local fragment_flag="--no-fragment-mode"
+    if [[ "${job_fragment_mode}" == "true" ]]; then
+      fragment_flag="--fragment-mode"
     fi
 
     local -a seg_cmd=(
@@ -723,6 +900,7 @@ run_job() {
       --cells-representation "${cells_representation}"
       "${pos_flag}"
       "${norm_flag}"
+      "${fragment_flag}"
     )
 
     if [[ "${alignment_loss}" == "true" ]]; then
@@ -1002,10 +1180,27 @@ for g in $(seq 0 $((NUM_GPUS - 1))); do
   declare -a "GPU_${g}_INDICES=()"
 done
 
+SKIPPED_EXISTING_FILE="${SUMMARY_DIR}/skipped_existing.tsv"
+declare -a PENDING_JOB_INDICES=()
+declare -a SKIPPED_JOB_INDICES=()
+for idx in "${!JOB_SPECS[@]}"; do
+  spec="${JOB_SPECS[$idx]}"
+  if [[ "${RESUME_IF_EXISTS}" == "1" ]] && job_outputs_complete "${spec}"; then
+    SKIPPED_JOB_INDICES+=("${idx}")
+  else
+    PENDING_JOB_INDICES+=("${idx}")
+  fi
+done
+if [[ "${#SKIPPED_JOB_INDICES[@]}" -gt 0 ]]; then
+  write_skipped_existing_summary "${SKIPPED_EXISTING_FILE}" "${SKIPPED_JOB_INDICES[@]}"
+else
+  rm -f "${SKIPPED_EXISTING_FILE}"
+fi
+
 idx=0
-for spec in "${JOB_SPECS[@]}"; do
+for pending_idx in "${PENDING_JOB_INDICES[@]}"; do
   g=$((idx % NUM_GPUS))
-  eval "GPU_${g}_INDICES+=(${idx})"
+  eval "GPU_${g}_INDICES+=(${pending_idx})"
   idx=$((idx + 1))
 done
 
@@ -1013,26 +1208,38 @@ done
 # Write job plan TSV
 # =========================================================================
 {
-  printf "job\tstudy_block\tgpu_group\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\tsg_loss_type\thidden_channels\tout_channels\ttx_weight_end\tbd_weight_end\tsg_weight_end\talignment_weight_end\tpositional_embeddings\tnormalize_embeddings\tcells_representation\tlearning_rate\n"
+  printf "job\tstudy_block\tgpu_group\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\tsg_loss_type\thidden_channels\tout_channels\ttx_weight_end\tbd_weight_end\tsg_weight_end\talignment_weight_end\tpositional_embeddings\tnormalize_embeddings\tcells_representation\tlearning_rate\tprediction_mode\tfragment_mode\n"
   for idx in "${!JOB_SPECS[@]}"; do
     local_group=$((idx % NUM_GPUS))
+    plan_prediction_mode="${PREDICTION_MODE}"
+    plan_fragment_mode="${ANCHOR_FRAGMENT_MODE}"
     IFS='|' read -r \
       job_name use_3d expansion tx_k tx_dist n_layers n_heads cells_min_counts min_qv \
       alignment_loss sg_loss_type hidden_channels out_channels \
       tx_weight_end bd_weight_end sg_weight_end alignment_weight_end \
       positional_embeddings normalize_embeddings cells_representation learning_rate \
       <<< "${JOB_SPECS[$idx]}"
+    case "${job_name}" in
+      abl_pred_nucleus) plan_prediction_mode="nucleus" ;;
+      abl_pred_uniform) plan_prediction_mode="uniform" ;;
+    esac
+    case "${job_name}" in
+      abl_frag_off) plan_fragment_mode="false" ;;
+      abl_frag_on) plan_fragment_mode="true" ;;
+    esac
     local_block="$(job_block "${job_name}")"
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
       "${job_name}" "${local_block}" "${local_group}" "${use_3d}" "${expansion}" "${tx_k}" "${tx_dist}" \
       "${n_layers}" "${n_heads}" "${cells_min_counts}" "${min_qv}" "${alignment_loss}" \
       "${sg_loss_type}" "${hidden_channels}" "${out_channels}" \
       "${tx_weight_end}" "${bd_weight_end}" "${sg_weight_end}" "${alignment_weight_end}" \
-      "${positional_embeddings}" "${normalize_embeddings}" "${cells_representation}" "${learning_rate}"
+      "${positional_embeddings}" "${normalize_embeddings}" "${cells_representation}" "${learning_rate}" \
+      "${plan_prediction_mode}" "${plan_fragment_mode}"
   done
 } > "${PLAN_FILE}"
 
 echo "[$(timestamp)] Prepared ${#JOB_SPECS[@]} ablation jobs across ${NUM_GPUS} GPU(s)."
+echo "[$(timestamp)] Pending jobs: ${#PENDING_JOB_INDICES[@]} | Pre-skipped existing: ${#SKIPPED_JOB_INDICES[@]}"
 echo "[$(timestamp)] GPUs: ${GPU_IDS[*]}"
 for g in $(seq 0 $((NUM_GPUS - 1))); do
   eval "_count=\${#GPU_${g}_INDICES[@]}"
@@ -1053,43 +1260,61 @@ fi
 # Launch GPU groups in parallel
 # =========================================================================
 
-PIDS=()
-for g in $(seq 0 $((NUM_GPUS - 1))); do
-  gpu="${GPU_IDS[$g]}"
-  eval "_arr=(\"\${GPU_${g}_INDICES[@]}\")"
-  if [[ "${#_arr[@]}" -gt 0 ]]; then
-    run_gpu_group "${gpu}" "${_arr[@]}" &
-    PIDS+=($!)
-  fi
-done
+if [[ "${#PENDING_JOB_INDICES[@]}" -gt 0 ]]; then
+  PIDS=()
+  for g in $(seq 0 $((NUM_GPUS - 1))); do
+    gpu="${GPU_IDS[$g]}"
+    eval "_arr=(\"\${GPU_${g}_INDICES[@]}\")"
+    if [[ "${#_arr[@]}" -gt 0 ]]; then
+      run_gpu_group "${gpu}" "${_arr[@]}" &
+      PIDS+=($!)
+    fi
+  done
 
-for pid in "${PIDS[@]}"; do
-  wait "${pid}"
-done
+  for pid in "${PIDS[@]}"; do
+    wait "${pid}"
+  done
+else
+  echo "[$(timestamp)] No pending jobs after pre-skip scan; skipping GPU execution."
+fi
 
 # =========================================================================
 # Post-run recovery pass
 # =========================================================================
 
-echo "[$(timestamp)] Starting post-run predict-only recovery pass..."
-run_post_recovery_predict_only
+if [[ "${#PENDING_JOB_INDICES[@]}" -gt 0 ]]; then
+  echo "[$(timestamp)] Starting post-run predict-only recovery pass..."
+  run_post_recovery_predict_only
+else
+  echo "[$(timestamp)] No pending jobs; skipping recovery pass."
+fi
 
 # =========================================================================
 # Combine summaries
 # =========================================================================
 
 COMBINED_SUMMARY="${SUMMARY_DIR}/all_jobs.tsv"
-if [[ -f "${SUMMARY_DIR}/recovery.tsv" ]]; then
-  awk 'FNR==1 && NR!=1 {next} {print}' "${SUMMARY_DIR}"/gpu*.tsv "${SUMMARY_DIR}/recovery.tsv" > "${COMBINED_SUMMARY}"
-  FAILED_COUNT=$(
-    awk -F'\t' 'NR>1 && $3!="ok" && $3!="recovered_predict_ok" {c++} END{print c+0}' "${SUMMARY_DIR}/recovery.tsv"
-  )
-else
-  awk 'FNR==1 && NR!=1 {next} {print}' "${SUMMARY_DIR}"/gpu*.tsv > "${COMBINED_SUMMARY}"
-  FAILED_COUNT=$(
-    awk -F'\t' 'NR>1 && $3!="ok" && $3!="skipped_existing" {c++} END{print c+0}' "${COMBINED_SUMMARY}"
-  )
+declare -a COMBINED_INPUTS=()
+if [[ -f "${SKIPPED_EXISTING_FILE}" ]]; then
+  COMBINED_INPUTS+=("${SKIPPED_EXISTING_FILE}")
 fi
+for summary_file in "${SUMMARY_DIR}"/gpu*.tsv; do
+  [[ -f "${summary_file}" ]] || continue
+  COMBINED_INPUTS+=("${summary_file}")
+done
+if [[ -f "${SUMMARY_DIR}/recovery.tsv" ]]; then
+  COMBINED_INPUTS+=("${SUMMARY_DIR}/recovery.tsv")
+fi
+
+if [[ "${#COMBINED_INPUTS[@]}" -eq 0 ]]; then
+  printf "job\tgpu\tstatus\telapsed_s\tseg_dir\tlog_file\n" > "${COMBINED_SUMMARY}"
+else
+  awk 'FNR==1 && NR!=1 {next} {print}' "${COMBINED_INPUTS[@]}" > "${COMBINED_SUMMARY}"
+fi
+
+FAILED_COUNT=$(
+  awk -F'\t' 'NR>1 && $3!="ok" && $3!="skipped_existing" && $3!="recovered_predict_ok" {c++} END{print c+0}' "${COMBINED_SUMMARY}"
+)
 
 echo "[$(timestamp)] Combined summary: ${COMBINED_SUMMARY}"
 if [[ -f "${SUMMARY_DIR}/recovery.tsv" ]]; then

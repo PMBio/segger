@@ -22,6 +22,37 @@ import pandas as pd
 from itertools import combinations
 
 
+_CELL_TYPE_COLUMN_ALIASES = (
+    "cell_type",
+    "celltype",
+    "cell_type_fine",
+    "celltype_major",
+    "annotation",
+    "annot",
+    "cell_label",
+    "cluster_annotation",
+)
+
+
+def _resolve_cell_type_column(
+    adata: ad.AnnData,
+    cell_type_column: str,
+) -> str:
+    """Return the requested or best-effort fallback cell-type column."""
+    if cell_type_column in adata.obs:
+        return cell_type_column
+
+    for candidate in _CELL_TYPE_COLUMN_ALIASES:
+        if candidate in adata.obs:
+            return candidate
+
+    available = ", ".join(str(column) for column in adata.obs.columns)
+    raise ValueError(
+        f"Could not resolve cell type column {cell_type_column!r}. "
+        f"Available obs columns: {available or '<none>'}."
+    )
+
+
 def find_markers(
     adata: ad.AnnData,
     cell_type_column: str,
@@ -53,12 +84,13 @@ def find_markers(
     """
     import scanpy as sc
 
+    resolved_cell_type_column = _resolve_cell_type_column(adata, cell_type_column)
     markers = {}
-    sc.tl.rank_genes_groups(adata, groupby=cell_type_column)
+    sc.tl.rank_genes_groups(adata, groupby=resolved_cell_type_column)
     genes = adata.var_names
 
-    for cell_type in adata.obs[cell_type_column].unique():
-        subset = adata[adata.obs[cell_type_column] == cell_type]
+    for cell_type in adata.obs[resolved_cell_type_column].unique():
+        subset = adata[adata.obs[resolved_cell_type_column] == cell_type]
         mean_expression = np.asarray(subset.X.mean(axis=0)).flatten()
 
         cutoff_high = np.percentile(mean_expression, 100 - pos_percentile)
@@ -115,6 +147,7 @@ def find_mutually_exclusive_genes(
     list
         List of mutually exclusive gene pairs as (gene1, gene2) tuples.
     """
+    resolved_cell_type_column = _resolve_cell_type_column(adata, cell_type_column)
     exclusive_genes = {}
 
     for cell_type, marker_sets in markers.items():
@@ -128,7 +161,7 @@ def find_mutually_exclusive_genes(
             gene_expr = adata[:, gene].X
             # Use plain NumPy masks for sparse indexing compatibility across
             # pandas/scipy versions (pandas Series no longer exposes .nonzero()).
-            cell_type_mask = (adata.obs[cell_type_column].to_numpy() == cell_type)
+            cell_type_mask = (adata.obs[resolved_cell_type_column].to_numpy() == cell_type)
             non_cell_type_mask = ~cell_type_mask
 
             # Check expression thresholds
@@ -295,13 +328,14 @@ def load_me_genes_from_scrna(
 
     # Load scRNA-seq data
     adata = sc.read_h5ad(scrna_path)
+    resolved_cell_type_column = _resolve_cell_type_column(adata, cell_type_column)
 
     # Subsample cells per cell type to limit runtime
-    if cell_type_column in adata.obs:
+    if resolved_cell_type_column in adata.obs:
         rng = np.random.default_rng(0)
         idx = []
-        for ct in adata.obs[cell_type_column].unique():
-            ct_idx = np.where(adata.obs[cell_type_column] == ct)[0]
+        for ct in adata.obs[resolved_cell_type_column].unique():
+            ct_idx = np.where(adata.obs[resolved_cell_type_column] == ct)[0]
             if ct_idx.size > _ME_MAX_CELLS_PER_TYPE:
                 ct_idx = rng.choice(
                     ct_idx,
@@ -332,7 +366,7 @@ def load_me_genes_from_scrna(
         )
         markers = find_markers(
             adata,
-            cell_type_column=cell_type_column,
+            cell_type_column=resolved_cell_type_column,
             pos_percentile=pos_percentile,
             neg_percentile=neg_percentile,
             percentage=percentage,
@@ -342,13 +376,13 @@ def load_me_genes_from_scrna(
     me_gene_pairs = find_mutually_exclusive_genes(
         adata,
         markers,
-        cell_type_column=cell_type_column,
+        cell_type_column=resolved_cell_type_column,
         expr_threshold_in=expr_threshold_in,
         expr_threshold_out=expr_threshold_out,
     )
 
     if verbose:
-        n_types = adata.obs[cell_type_column].nunique()
+        n_types = adata.obs[resolved_cell_type_column].nunique()
         elapsed = time.monotonic() - t0
         print(
             f"[segger][me] done: {len(me_gene_pairs)} pairs "

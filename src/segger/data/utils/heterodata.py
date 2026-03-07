@@ -5,6 +5,7 @@ import polars as pl
 import scanpy as sc
 import numpy as np
 import torch
+import pandas as pd
 
 from ...io import TrainingBoundaryFields, TrainingTranscriptFields
 from ...models.alignment_loss import compute_me_gene_edges
@@ -103,11 +104,21 @@ def setup_heterodata(
     )
     
     # Sort boundaries by AnnData ordering
+    obs_cell_ids = adata.obs[bd_fields.id].astype(str)
+    boundaries = boundaries.reset_index(names=bd_fields.index).copy()
+    boundaries[bd_fields.id] = boundaries[bd_fields.id].astype(str)
+    boundary_id_index = pd.Index(boundaries[bd_fields.id], dtype="object")
+    missing_ids = obs_cell_ids[~obs_cell_ids.isin(boundary_id_index)]
+    if len(missing_ids) > 0:
+        preview = ", ".join(map(str, pd.Index(missing_ids).unique()[:5]))
+        raise KeyError(
+            f"AnnData/boundary cell_id mismatch: {len(missing_ids)} ids missing "
+            f"in boundaries (examples: {preview})."
+        )
     boundaries = (
         boundaries
-        .reset_index(names=bd_fields.index)
         .set_index(bd_fields.id)
-        .loc[adata.obs[bd_fields.id]]
+        .loc[obs_cell_ids]
         .reset_index(bd_fields.id)
         .set_index(bd_fields.index)
     )

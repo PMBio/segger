@@ -37,11 +37,15 @@ class XeniumBoundaryFields:
 @dataclass
 class MerscopeTranscriptFields:
     filename: str = 'detected_transcripts.csv'
+    fallback_filename: str = 'transcripts.parquet'
     x: str = 'global_x'
     y: str = 'global_y'
     z: str = 'global_z'
     feature: str = 'gene'
     cell_id: str = 'cell_id'
+    cell_boundary_id: str = 'cell_boundaries_id'
+    nucleus_boundary_id: str = 'nucleus_boundaries_id'
+    quality: str = 'score'
 
 @dataclass
 class MerscopeBoundaryFields:
@@ -54,6 +58,7 @@ class MerscopeBoundaryFields:
 @dataclass
 class CosMxTranscriptFields:
     filename: str = '*_tx_file.csv'
+    fallback_filename: str = 'transcripts.parquet'
     x: str = 'x_global_px'
     y: str = 'y_global_px'
     z: str = 'z'

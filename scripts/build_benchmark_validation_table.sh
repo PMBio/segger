@@ -5,6 +5,9 @@ usage() {
   cat <<'EOF'
 Build per-job validation metrics table for a benchmark root.
 
+This script intentionally runs the fast validation subset only:
+assigned, mecr, border-contamination, resolvi, tco, and vsi.
+
 Usage:
   bash scripts/build_benchmark_validation_table.sh [options]
 
@@ -15,6 +18,7 @@ Options:
   --recompute                     Recompute all jobs even if already present in output TSV
   --segger-bin <cmd>              Segger executable/command (default: segger)
   --me-gene-pairs-path <file>     Optional ME-gene pair file passed to segger validate
+  --tissue-type <name>            Optional tissue type passed to segger validate
   --scrna-reference-path <file>   Optional scRNA h5ad passed to segger validate
   --scrna-celltype-column <name>  scRNA cell type column (default: cell_type)
   --max-me-gene-pairs <int>       Max sampled ME-gene pairs (default: 500)
@@ -70,6 +74,7 @@ INPUT_DIR=""
 OUT_TSV=""
 SEGGER_BIN="segger"
 ME_GENE_PAIRS_PATH=""
+TISSUE_TYPE=""
 SCRNA_REFERENCE_PATH=""
 SCRNA_CELLTYPE_COLUMN="cell_type"
 MAX_ME_GENE_PAIRS=500
@@ -78,6 +83,14 @@ GPU_B="${GPU_B:-1}"
 INCLUDE_DEFAULT_10X="true"
 REFERENCE_UNIVERSE_SEG=""
 RECOMPUTE=0
+VALIDATE_FAST_FLAGS=(
+  --assigned
+  --mecr
+  --border-contamination
+  --resolvi
+  --tco
+  --vsi
+)
 
 require_value() {
   local opt="$1"
@@ -116,6 +129,11 @@ while [[ $# -gt 0 ]]; do
     --me-gene-pairs-path)
       require_value "$1" "${2-}"
       ME_GENE_PAIRS_PATH="$2"
+      shift 2
+      ;;
+    --tissue-type)
+      require_value "$1" "${2-}"
+      TISSUE_TYPE="$2"
       shift 2
       ;;
     --scrna-reference-path)
@@ -189,6 +207,11 @@ if [[ -n "${ME_GENE_PAIRS_PATH}" ]] && [[ ! -f "${ME_GENE_PAIRS_PATH}" ]]; then
   exit 1
 fi
 
+if [[ -n "${TISSUE_TYPE}" && -n "${SCRNA_REFERENCE_PATH}" ]]; then
+  echo "ERROR: --tissue-type and --scrna-reference-path are mutually exclusive." >&2
+  exit 1
+fi
+
 if [[ -n "${SCRNA_REFERENCE_PATH}" ]] && [[ ! -f "${SCRNA_REFERENCE_PATH}" ]]; then
   echo "ERROR: --scrna-reference-path not found: ${SCRNA_REFERENCE_PATH}" >&2
   exit 1
@@ -248,9 +271,13 @@ tmp_out="$(mktemp)"
 tmp_row="$(mktemp "${TMPDIR:-/tmp}/segger_validate_row.XXXXXX.tsv")"
 trap 'rm -f "${tmp_out}" "${tmp_row}"' EXIT
 
-METRIC_SCHEMA_VERSION="2026-03-02-v10"
+METRIC_SCHEMA_VERSION="2026-03-02-v11"
 RUN_INPUT_DIR_TOKEN="$(normalize_token "${INPUT_DIR}")"
-RUN_SCRNA_REFERENCE_TOKEN="$(normalize_token "${SCRNA_REFERENCE_PATH}")"
+if [[ -n "${TISSUE_TYPE}" ]]; then
+  RUN_SCRNA_REFERENCE_TOKEN="$(normalize_token "tissue:${TISSUE_TYPE}")"
+else
+  RUN_SCRNA_REFERENCE_TOKEN="$(normalize_token "${SCRNA_REFERENCE_PATH}")"
+fi
 RUN_ME_GENE_PAIRS_TOKEN="$(normalize_token "${ME_GENE_PAIRS_PATH}")"
 
 REFERENCE_UNIVERSE_SEG_RESOLVED=""
@@ -552,6 +579,7 @@ run_validate_for_row() {
     "${SEGGER_BIN}" validate
     -s "${seg_path}"
     -o "${tmp_row}"
+    "${VALIDATE_FAST_FLAGS[@]}"
     --max-me-gene-pairs "${MAX_ME_GENE_PAIRS}"
   )
   if [[ -f "${anndata_path}" ]]; then
@@ -563,7 +591,9 @@ run_validate_for_row() {
   if [[ -n "${ME_GENE_PAIRS_PATH}" ]]; then
     cmd+=(--me-gene-pairs-path "${ME_GENE_PAIRS_PATH}")
   fi
-  if [[ -n "${SCRNA_REFERENCE_PATH}" ]]; then
+  if [[ -n "${TISSUE_TYPE}" ]]; then
+    cmd+=(--tissue-type "${TISSUE_TYPE}")
+  elif [[ -n "${SCRNA_REFERENCE_PATH}" ]]; then
     cmd+=(
       --scrna-reference-path "${SCRNA_REFERENCE_PATH}"
       --scrna-celltype-column "${SCRNA_CELLTYPE_COLUMN}"

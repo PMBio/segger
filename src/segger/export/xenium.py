@@ -173,6 +173,29 @@ def _prepare_input_boundaries(
     return cell_lookup, nucleus_lookup
 
 
+def _open_output_group(path: Path) -> "zarr.Group":
+    """Open an output group, forcing zip stores and v2 metadata for Xenium files."""
+    use_zip = path.suffix == ".zip" or path.name.endswith(".zarr.zip")
+    if use_zip:
+        if path.exists() and path.is_dir():
+            raise FileExistsError(
+                f"Expected a zip file but found a directory at {path}. "
+                "Please remove or rename this directory and re-run export."
+            )
+        if path.exists() and path.is_file():
+            path.unlink()
+        store = ZipStore(path, mode="w")
+        try:
+            return zarr.open_group(store, mode="w", zarr_format=2)
+        except TypeError:
+            return zarr.open_group(store, mode="w")
+
+    try:
+        return zarr.open_group(path, mode="w", zarr_format=2)
+    except TypeError:
+        return zarr.open_group(path, mode="w")
+
+
 def get_indices_indptr(input_array: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Get sparse matrix representation for cluster assignments.
 
@@ -444,7 +467,7 @@ def seg2explorer(
     # Open source store and create new store
     source_zarr_store = ZipStore(source_path / "cells.zarr.zip", mode="r")
     existing_store = zarr.open(source_zarr_store, mode="r")
-    new_store = zarr.open(storage / f"{cells_filename}.zarr.zip", mode="w")
+    new_store = _open_output_group(storage / f"{cells_filename}.zarr.zip")
 
     # Root datasets
     cell_id_arr = np.zeros((n_cells, 2), dtype=np.uint32)
@@ -507,7 +530,7 @@ def seg2explorer(
         for cluster in clusters_names
     }
 
-    new_zarr = zarr.open(storage / f"{analysis_filename}.zarr.zip", mode="w")
+    new_zarr = _open_output_group(storage / f"{analysis_filename}.zarr.zip")
     new_zarr.create_group("/cell_groups")
 
     for i, cluster in enumerate(clusters_names):
@@ -799,7 +822,7 @@ def seg2explorer_pqdm(
     # Open source and create new store
     source_zarr_store = ZipStore(source_path / "cells.zarr.zip", mode="r")
     existing_store = zarr.open(source_zarr_store, mode="r")
-    new_store = zarr.open(storage / f"{cells_filename}.zarr.zip", mode="w")
+    new_store = _open_output_group(storage / f"{cells_filename}.zarr.zip")
 
     # Root datasets
     cell_id_arr = np.zeros((n_cells, 2), dtype=np.uint32)
@@ -855,7 +878,7 @@ def seg2explorer_pqdm(
         for cluster in clusters_names
     }
 
-    new_zarr = zarr.open(storage / f"{analysis_filename}.zarr.zip", mode="w")
+    new_zarr = _open_output_group(storage / f"{analysis_filename}.zarr.zip")
     new_zarr.create_group("/cell_groups")
 
     for i, cluster in enumerate(clusters_names):

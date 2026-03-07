@@ -21,8 +21,10 @@ EOF
 
 ROOT="./results/mossi_main_big_benchmark_nightly"
 OUT_TSV=""
+OUT_TSV_SET=0
 WATCH_SEC=0
 NO_COLOR=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       OUT_TSV="$2"
+      OUT_TSV_SET=1
       shift 2
       ;;
     --watch)
@@ -85,8 +88,30 @@ VALIDATION_TSV="${SUMMARY_DIR}/validation_metrics.tsv"
 if [[ ! -f "${VALIDATION_TSV}" ]] && [[ -f "${ROOT}/validation_metrics.tsv" ]]; then
   VALIDATION_TSV="${ROOT}/validation_metrics.tsv"
 fi
+if [[ ! -f "${VALIDATION_TSV}" ]] && [[ -f "./results/validation_metrics.tsv" ]]; then
+  VALIDATION_TSV="./results/validation_metrics.tsv"
+fi
+LSF_SUBMIT_HOST="${LSF_SUBMIT_HOST:-local}"
+case "${LSF_SUBMIT_HOST}" in
+  local|LOCAL|none|NONE|-)
+    LSF_SUBMIT_HOST=""
+    ;;
+esac
 
 if [[ ! -f "${PLAN_FILE}" ]]; then
+  if [[ -d "${ROOT}/datasets" ]] && [[ -f "${SCRIPT_DIR}/benchmark_status_dashboard_lsf_multi.sh" ]]; then
+    cmd=(bash "${SCRIPT_DIR}/benchmark_status_dashboard_lsf_multi.sh" --root "${ROOT}")
+    if [[ "${OUT_TSV_SET}" == "1" ]]; then
+      cmd+=(--out-tsv "${OUT_TSV}")
+    fi
+    if [[ "${WATCH_SEC}" -gt 0 ]]; then
+      cmd+=(--watch "${WATCH_SEC}")
+    fi
+    if [[ "${NO_COLOR}" == "1" ]]; then
+      cmd+=(--no-color)
+    fi
+    exec "${cmd[@]}"
+  fi
   echo "ERROR: Missing plan file: ${PLAN_FILE}" >&2
   exit 1
 fi
@@ -119,6 +144,8 @@ collect_status_map() {
   local -a status_files=()
   local f
   local include_recovery=1
+  local newest_gpu_mtime=0
+  local recovery_mtime=0
 
   if [[ -n "${running_jobs_file}" ]] && [[ -s "${running_jobs_file}" ]]; then
     include_recovery=0
@@ -127,9 +154,26 @@ collect_status_map() {
   for f in "${SUMMARY_DIR}"/gpu*.tsv; do
     [[ -f "${f}" ]] || continue
     status_files+=("${f}")
+    local mtime=0
+    mtime="$(date -r "${f}" +%s 2>/dev/null || stat -f %m "${f}" 2>/dev/null || stat -c %Y "${f}" 2>/dev/null || echo 0)"
+    if [[ "${mtime}" -gt "${newest_gpu_mtime}" ]]; then
+      newest_gpu_mtime="${mtime}"
+    fi
   done
+  if [[ -f "${SUMMARY_DIR}/skipped_existing.tsv" ]]; then
+    status_files+=("${SUMMARY_DIR}/skipped_existing.tsv")
+    local mtime=0
+    mtime="$(date -r "${SUMMARY_DIR}/skipped_existing.tsv" +%s 2>/dev/null || stat -f %m "${SUMMARY_DIR}/skipped_existing.tsv" 2>/dev/null || stat -c %Y "${SUMMARY_DIR}/skipped_existing.tsv" 2>/dev/null || echo 0)"
+    if [[ "${mtime}" -gt "${newest_gpu_mtime}" ]]; then
+      newest_gpu_mtime="${mtime}"
+    fi
+  fi
   if [[ "${include_recovery}" == "1" ]] && [[ -f "${SUMMARY_DIR}/recovery.tsv" ]]; then
-    status_files+=("${SUMMARY_DIR}/recovery.tsv")
+    recovery_mtime="$(date -r "${SUMMARY_DIR}/recovery.tsv" +%s 2>/dev/null || stat -f %m "${SUMMARY_DIR}/recovery.tsv" 2>/dev/null || stat -c %Y "${SUMMARY_DIR}/recovery.tsv" 2>/dev/null || echo 0)"
+    # Ignore stale recovery.tsv while a fresh run is underway.
+    if [[ "${recovery_mtime}" -ge "${newest_gpu_mtime}" ]]; then
+      status_files+=("${SUMMARY_DIR}/recovery.tsv")
+    fi
   fi
 
   if [[ "${#status_files[@]}" -eq 0 ]]; then
@@ -138,26 +182,50 @@ collect_status_map() {
   fi
 
   awk -F'\t' '
-    FNR == 1 { next }
-    {
-      job = $1
-      gpu = $2
-      status = $3
-      elapsed = $4
-      note = ""
-      seg = ""
-      log_path = ""
-      if (NF >= 7) {
-        note = $5
-        seg = $6
-        log_path = $7
-      } else if (NF >= 6) {
-        seg = $5
-        log_path = $6
+    FNR == 1 {
+      delete idx
+      for (i = 1; i <= NF; i++) {
+        idx[$i] = i
       }
+      next
+    }
+    {
+      job = (("job" in idx) && idx["job"] > 0) ? $(idx["job"]) : $1
+      gpu = (("gpu" in idx) && idx["gpu"] > 0) ? $(idx["gpu"]) : ((NF >= 2) ? $2 : "")
+      status = (("status" in idx) && idx["status"] > 0) ? $(idx["status"]) : ((NF >= 3) ? $3 : "")
+      elapsed = (("elapsed_s" in idx) && idx["elapsed_s"] > 0) ? $(idx["elapsed_s"]) : ((NF >= 4) ? $4 : "")
+      note = (("note" in idx) && idx["note"] > 0) ? $(idx["note"]) : ""
+      seg = (("seg_dir" in idx) && idx["seg_dir"] > 0) ? $(idx["seg_dir"]) : ""
+      log_path = (("log_file" in idx) && idx["log_file"] > 0) ? $(idx["log_file"]) : ""
+      segment_status = (("segment_status" in idx) && idx["segment_status"] > 0) ? $(idx["segment_status"]) : ""
+      export_status = (("export_status" in idx) && idx["export_status"] > 0) ? $(idx["export_status"]) : ""
+      segment_job_id = (("segment_job_id" in idx) && idx["segment_job_id"] > 0) ? $(idx["segment_job_id"]) : ""
+      export_job_id = (("export_job_id" in idx) && idx["export_job_id"] > 0) ? $(idx["export_job_id"]) : ""
+      export_note = (("export_note" in idx) && idx["export_note"] > 0) ? $(idx["export_note"]) : ""
 
       if (note == "") {
         note = "-"
+      }
+      if (seg == "") {
+        seg = "-"
+      }
+      if (log_path == "") {
+        log_path = "-"
+      }
+      if (segment_status == "") {
+        segment_status = "-"
+      }
+      if (export_status == "") {
+        export_status = "-"
+      }
+      if (segment_job_id == "") {
+        segment_job_id = "-"
+      }
+      if (export_job_id == "") {
+        export_job_id = "-"
+      }
+      if (export_note == "") {
+        export_note = "-"
       }
       gpu_map[job] = gpu
       status_map[job] = status
@@ -165,17 +233,27 @@ collect_status_map() {
       note_map[job] = note
       seg_map[job] = seg
       log_map[job] = log_path
+      segment_status_map[job] = segment_status
+      export_status_map[job] = export_status
+      segment_job_id_map[job] = segment_job_id
+      export_job_id_map[job] = export_job_id
+      export_note_map[job] = export_note
     }
     END {
       for (job in status_map) {
-        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
           job,
           gpu_map[job],
           status_map[job],
           elapsed_map[job],
           note_map[job],
           seg_map[job],
-          log_map[job]
+          log_map[job],
+          segment_status_map[job],
+          export_status_map[job],
+          segment_job_id_map[job],
+          export_job_id_map[job],
+          export_note_map[job]
       }
     }
   ' "${status_files[@]}" > "${out_file}"
@@ -188,7 +266,7 @@ collect_running_jobs() {
     return 0
   fi
 
-  pgrep -af 'segger segment|segger predict' 2>/dev/null \
+  pgrep -af 'segger segment|segger predict|segger export' 2>/dev/null \
     | awk '
       {
         for (i = 1; i <= NF; i++) {
@@ -197,7 +275,11 @@ collect_running_jobs() {
             gsub(/\/+$/, "", out)
             n = split(out, a, "/")
             if (n > 0) {
-              print a[n]
+              job = a[n]
+              if ((job == "anndata" || job == "xenium_explorer") && n > 1) {
+                job = a[n - 1]
+              }
+              print job
             }
           }
         }
@@ -205,6 +287,107 @@ collect_running_jobs() {
     ' \
     | sed '/^$/d' \
     | sort -u > "${out_file}" || : > "${out_file}"
+
+  # Fallback: infer active job from logs when latest START has no terminal marker.
+  local log_file
+  for log_file in "${LOGS_DIR}"/*.gpu*.log; do
+    [[ -f "${log_file}" ]] || continue
+    awk -F'job=' '
+      /\] START job=/ {
+        split($2, a, /[[:space:]]+/)
+        job = a[1]
+        started = 1
+        done = 0
+      }
+      /\] DONE job=/ || /\] FAIL job=/ {
+        done = 1
+      }
+      END {
+        if (started == 1 && done == 0 && job != "") {
+          print job
+        }
+      }
+    ' "${log_file}" >> "${out_file}"
+  done
+  if [[ -s "${out_file}" ]]; then
+    sort -u -o "${out_file}" "${out_file}"
+  fi
+}
+
+is_remote_lsf_enabled() {
+  [[ -n "${LSF_SUBMIT_HOST:-}" ]]
+}
+
+collect_lsf_state_map() {
+  local status_map="$1"
+  local out_file="$2"
+  local job_ids_file states_file raw_file id_list
+
+  : > "${out_file}"
+  job_ids_file="$(mktemp)"
+  states_file="$(mktemp)"
+  raw_file="$(mktemp)"
+
+  awk -F'\t' '
+    {
+      segment_job_id = (NF >= 10 && $10 != "-") ? $10 : ""
+      export_job_id = (NF >= 11 && $11 != "-") ? $11 : ""
+      export_status = (NF >= 9 && $9 != "-") ? tolower($9) : ""
+      note = (NF >= 5) ? $5 : ""
+      selected_job_id = segment_job_id
+
+      if (export_job_id != "" && (export_status == "planned" || export_status == "pending" || export_status == "running")) {
+        selected_job_id = export_job_id
+      }
+      if (selected_job_id == "" && match(note, /lsf_job=[0-9]+/)) {
+        selected_job_id = substr(note, RSTART + 8, RLENGTH - 8)
+      }
+      if (selected_job_id != "") {
+        print $1 "\t" selected_job_id
+      }
+    }
+  ' "${status_map}" > "${job_ids_file}"
+
+  if [[ ! -s "${job_ids_file}" ]]; then
+    rm -f "${job_ids_file}" "${states_file}" "${raw_file}"
+    return 0
+  fi
+
+  id_list="$(awk -F'\t' '!seen[$2]++ { printf("%s%s", sep, $2); sep=" " }' "${job_ids_file}")"
+  if [[ -z "${id_list}" ]]; then
+    rm -f "${job_ids_file}" "${states_file}" "${raw_file}"
+    return 0
+  fi
+
+  if is_remote_lsf_enabled; then
+    if command -v ssh >/dev/null 2>&1; then
+      ssh -o BatchMode=yes "${LSF_SUBMIT_HOST}" "bjobs -a -noheader -o 'jobid stat' ${id_list}" > "${raw_file}" 2>/dev/null || true
+    fi
+  elif command -v bjobs >/dev/null 2>&1; then
+    bjobs -a -noheader -o "jobid stat" ${id_list} > "${raw_file}" 2>/dev/null || true
+  fi
+
+  awk '
+    NF >= 2 {
+      print $1 "\t" $2
+    }
+  ' "${raw_file}" > "${states_file}"
+
+  awk -F'\t' '
+    NR == FNR {
+      state_by_id[$1] = $2
+      next
+    }
+    {
+      state = ""
+      if ($2 in state_by_id) {
+        state = state_by_id[$2]
+      }
+      print $1 "\t" $2 "\t" state
+    }
+  ' "${states_file}" "${job_ids_file}" > "${out_file}"
+
+  rm -f "${job_ids_file}" "${states_file}" "${raw_file}"
 }
 
 pick_log_file() {
@@ -218,28 +401,175 @@ pick_log_file() {
   printf '%s' "${found}"
 }
 
+pick_attempt_log_file() {
+  local job="$1"
+  local suffix="$2"
+  local f
+  local best=""
+  local best_num=-1
+  local name num
+  for f in "${LOGS_DIR}/${job}.attempt"*".${suffix}"; do
+    [[ -f "${f}" ]] || continue
+    name="$(basename "${f}")"
+    num="$(printf '%s\n' "${name}" | sed -n 's/.*\.attempt\([0-9][0-9]*\)\..*/\1/p')"
+    [[ -n "${num}" ]] || continue
+    if [[ "${num}" -gt "${best_num}" ]]; then
+      best="${f}"
+      best_num="${num}"
+    fi
+  done
+  printf '%s' "${best}"
+}
+
+read_export_rc() {
+  local seg_dir="$1"
+  local status_file="${seg_dir}/.export_status"
+  if [[ ! -f "${status_file}" ]]; then
+    return 0
+  fi
+  awk -F'=' '
+    $1 == "export_rc" {
+      print $2
+      exit
+    }
+  ' "${status_file}" 2>/dev/null
+}
+
+read_stage_field() {
+  local file_path="$1"
+  local key="$2"
+  if [[ ! -f "${file_path}" ]]; then
+    return 0
+  fi
+  awk -F'=' -v target="${key}" '
+    $1 == target {
+      print $2
+      exit
+    }
+  ' "${file_path}" 2>/dev/null
+}
+
+read_segment_stage_status() {
+  local seg_dir="$1"
+  read_stage_field "${seg_dir}/.segment_status" "segment_status"
+}
+
+read_export_stage_status() {
+  local seg_dir="$1"
+  read_stage_field "${seg_dir}/.export_status" "export_status"
+}
+
+read_export_stage_note() {
+  local seg_dir="$1"
+  read_stage_field "${seg_dir}/.export_status" "export_note"
+}
+
+get_validation_status_for_job() {
+  local job="$1"
+  if [[ ! -f "${VALIDATION_TSV}" ]]; then
+    return 0
+  fi
+  awk -F'\t' -v j="${job}" '
+    FNR == 1 {
+      for (i = 1; i <= NF; i++) {
+        idx[$i] = i
+      }
+      next
+    }
+    (("job" in idx) && idx["job"] > 0) && $(idx["job"]) == j {
+      validate_status = (("validate_status" in idx) && idx["validate_status"] > 0) ? $(idx["validate_status"]) : ""
+      if (validate_status == "ok" && ("run_input_dir" in idx) && idx["run_input_dir"] > 0) {
+        run_input_dir = $(idx["run_input_dir"])
+        lower = tolower(run_input_dir)
+        if (run_input_dir == "" || run_input_dir == "-" || lower == "nan" || lower == "none") {
+          validate_status = "missing_input_dir"
+        }
+      }
+      print validate_status
+      exit
+    }
+  ' "${VALIDATION_TSV}"
+}
+
+infer_failure_status_from_log() {
+  local log_file="$1"
+  local fallback_status="${2:-}"
+  local lower_status
+  lower_status="$(printf '%s' "${fallback_status}" | tr '[:upper:]' '[:lower:]')"
+
+  case "${lower_status}" in
+    ""|ok|skipped_existing|recovered_predict_ok|running|in_progress|pending|partial|reference)
+      printf '%s' "${fallback_status}"
+      return 0
+      ;;
+    segment_oom|segment_runlimit|segment_ancdata|segment_error|predict_error|predict_oom|predict_runlimit)
+      printf '%s' "${fallback_status}"
+      return 0
+      ;;
+  esac
+
+  if [[ -f "${log_file}" ]]; then
+    if grep -Eq 'FAIL job=.*step=segment(_retry)? \(ancdata\)' "${log_file}" 2>/dev/null; then
+      printf 'segment_ancdata'
+      return 0
+    fi
+    if grep -Eq 'FAIL job=.*step=segment(_retry)? \(OOT ' "${log_file}" 2>/dev/null; then
+      printf 'segment_runlimit'
+      return 0
+    fi
+    if grep -Eq 'FAIL job=.*step=segment(_retry)? \(oom\)' "${log_file}" 2>/dev/null; then
+      printf 'segment_oom'
+      return 0
+    fi
+    if grep -Eq 'FAIL job=.*step=segment(_retry)?' "${log_file}" 2>/dev/null; then
+      printf 'segment_error'
+      return 0
+    fi
+    if grep -Eq 'FAIL job=.*step=predict|predict_only_failed|recovered_predict_failed' "${log_file}" 2>/dev/null; then
+      printf 'predict_error'
+      return 0
+    fi
+  fi
+
+  case "${lower_status}" in
+    recovery_no_checkpoint|missing_segmentation)
+      printf 'segment_error'
+      ;;
+    recovered_predict_failed)
+      printf 'predict_error'
+      ;;
+    *)
+      printf '%s' "${fallback_status}"
+      ;;
+  esac
+}
+
 build_snapshot() {
   local status_map="$1"
   local running_jobs="$2"
   local out_file="$3"
-  local tmp_file
+  local tmp_file lsf_state_map
   local plan_header plan_has_study_block
   tmp_file="$(mktemp)"
+  lsf_state_map="$(mktemp)"
 
   plan_header="$(head -n 1 "${PLAN_FILE}")"
   plan_has_study_block=0
   if printf '%s\n' "${plan_header}" | tr '\t' '\n' | grep -Fxq "study_block"; then
     plan_has_study_block=1
   fi
+  collect_lsf_state_map "${status_map}" "${lsf_state_map}"
 
-  printf "job\tgroup\tgpu\tstatus\tstate\trunning\telapsed_s\trun_count\thad_rerun\thad_anc_retry\thad_predict_fallback\thad_recovery_pass\tseg_exists\tanndata_exists\txenium_exists\tseg_dir\tlog_file\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\tnote\n" > "${tmp_file}"
+  printf "job\tgroup\tgpu\tstatus\tstate\trunning\telapsed_s\trun_count\thad_rerun\thad_anc_retry\thad_predict_fallback\thad_recovery_pass\tseg_exists\tanndata_exists\txenium_exists\tseg_dir\tlog_file\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\tsegment_status\texport_status\tsegment_job_id\texport_job_id\texport_note\tnote\n" > "${tmp_file}"
 
   tail -n +2 "${PLAN_FILE}" | while IFS=$'\t' read -r -a cols; do
     local job group use_3d expansion tx_max_k tx_max_dist n_mid_layers n_heads cells_min_counts min_qv alignment_loss
-    local row gpu status elapsed note seg_dir log_file
+    local row lsf_row gpu status elapsed note seg_dir log_file attempt_err_log attempt_out_log
+    local row_segment_status row_export_status row_segment_job_id row_export_job_id row_export_note
     local running seg_exists anndata_exists xenium_exists
     local run_count had_rerun had_anc_retry had_predict_fallback had_recovery_pass
-    local state
+    local state validate_status lsf_job_id lsf_state export_rc
+    local stage_segment_status stage_export_status stage_export_note
 
     if [[ "${plan_has_study_block}" == "1" ]]; then
       job="${cols[0]-}"
@@ -274,28 +604,44 @@ build_snapshot() {
     note=""
     seg_dir=""
     log_file=""
+    row_segment_status=""
+    row_export_status=""
+    row_segment_job_id=""
+    row_export_job_id=""
+    row_export_note=""
     if [[ -n "${row}" ]]; then
-      IFS=$'\t' read -r _ gpu status elapsed note seg_dir log_file <<< "${row}"
+      IFS=$'\t' read -r _ gpu status elapsed note seg_dir log_file row_segment_status row_export_status row_segment_job_id row_export_job_id row_export_note <<< "${row}"
       if [[ "${note}" == "-" ]]; then
         note=""
+      fi
+      if [[ "${seg_dir}" == "-" ]]; then
+        seg_dir=""
+      fi
+      if [[ "${log_file}" == "-" ]]; then
+        log_file=""
+      fi
+      if [[ "${row_segment_status}" == "-" ]]; then
+        row_segment_status=""
+      fi
+      if [[ "${row_export_status}" == "-" ]]; then
+        row_export_status=""
+      fi
+      if [[ "${row_segment_job_id}" == "-" ]]; then
+        row_segment_job_id=""
+      fi
+      if [[ "${row_export_job_id}" == "-" ]]; then
+        row_export_job_id=""
+      fi
+      if [[ "${row_export_note}" == "-" ]]; then
+        row_export_note=""
       fi
     fi
 
     [[ -n "${seg_dir}" ]] || seg_dir="${RUNS_DIR}/${job}"
     [[ -n "${log_file}" ]] || log_file="$(pick_log_file "${job}")"
     [[ -n "${log_file}" ]] || log_file="${LOGS_DIR}/${job}.gpu?.log"
-
-    running=0
-    if [[ -s "${running_jobs}" ]] && grep -Fxq "${job}" "${running_jobs}"; then
-      running=1
-    fi
-
-    seg_exists=0
-    anndata_exists=0
-    xenium_exists=0
-    [[ -f "${RUNS_DIR}/${job}/segger_segmentation.parquet" ]] && seg_exists=1
-    [[ -f "${EXPORTS_DIR}/${job}/anndata/segger_segmentation.h5ad" ]] && anndata_exists=1
-    [[ -f "${EXPORTS_DIR}/${job}/xenium_explorer/seg_experiment.xenium" ]] && xenium_exists=1
+    attempt_err_log="$(pick_attempt_log_file "${job}" "err")"
+    attempt_out_log="$(pick_attempt_log_file "${job}" "out")"
 
     run_count=0
     had_rerun=0
@@ -303,7 +649,7 @@ build_snapshot() {
     had_predict_fallback=0
     had_recovery_pass=0
     if [[ -f "${log_file}" ]]; then
-      run_count="$(grep -c "START job=${job}" "${log_file}" 2>/dev/null || printf '0')"
+      run_count="$(awk -v needle="START job=${job}" 'index($0, needle) { count++ } END { print count + 0 }' "${log_file}" 2>/dev/null)"
       if [[ "${run_count}" -gt 1 ]]; then
         had_rerun=1
       fi
@@ -312,14 +658,70 @@ build_snapshot() {
       grep -q "RECOVERY job=${job}" "${log_file}" 2>/dev/null && had_recovery_pass=1 || true
     fi
 
+    validate_status="$(get_validation_status_for_job "${job}")"
+    lsf_row="$(awk -F'\t' -v j="${job}" '$1 == j { print; exit }' "${lsf_state_map}")"
+    lsf_job_id=""
+    lsf_state=""
+    export_rc="$(read_export_rc "${seg_dir}")"
+    stage_segment_status="$(read_segment_stage_status "${seg_dir}")"
+    stage_export_status="$(read_export_stage_status "${seg_dir}")"
+    stage_export_note="$(read_export_stage_note "${seg_dir}")"
+    [[ -n "${stage_segment_status}" ]] || stage_segment_status="${row_segment_status}"
+    [[ -n "${stage_export_status}" ]] || stage_export_status="${row_export_status}"
+    [[ -n "${stage_export_note}" ]] || stage_export_note="${row_export_note}"
+    [[ -n "${lsf_job_id}" ]] || lsf_job_id="${row_segment_job_id}"
+    if [[ -n "${lsf_row}" ]]; then
+      IFS=$'\t' read -r _ lsf_job_id lsf_state <<< "${lsf_row}"
+    fi
+
+    running=0
+    if [[ -s "${running_jobs}" ]] && grep -Fxq "${job}" "${running_jobs}"; then
+      running=1
+    fi
+    case "${lsf_state}" in
+      RUN|PROV)
+        running=1
+        ;;
+    esac
+
+    seg_exists=0
+    anndata_exists=0
+    xenium_exists=0
+    [[ -f "${RUNS_DIR}/${job}/segger_segmentation.parquet" ]] && seg_exists=1
+    [[ -f "${EXPORTS_DIR}/${job}/anndata/segger_segmentation.h5ad" ]] && anndata_exists=1
+    [[ -f "${EXPORTS_DIR}/${job}/xenium_explorer/seg_experiment.xenium" ]] && xenium_exists=1
+
+    # Keep historical completion visible even if large artifacts were cleaned up.
+    # Do not mark as complete when validation explicitly reports failure.
+    case "${status}" in
+      ok|skipped_existing|recovered_predict_ok)
+        if [[ -z "${validate_status}" ]] || [[ "${validate_status}" == "ok" ]]; then
+          if [[ "${seg_exists}" == "0" ]]; then
+            seg_exists=1
+          fi
+          if [[ "${anndata_exists}" == "0" ]]; then
+            anndata_exists=1
+          fi
+          if [[ "${xenium_exists}" == "0" ]]; then
+            xenium_exists=1
+          fi
+        fi
+        ;;
+    esac
+
     state="pending"
-    if [[ "${running}" == "1" ]]; then
-      state="running"
-    elif [[ "${seg_exists}" == "1" && "${anndata_exists}" == "1" && "${xenium_exists}" == "1" ]]; then
-      state="done"
-    elif [[ -n "${status}" ]]; then
+    if [[ -n "${status}" ]]; then
       case "${status}" in
         ok|skipped_existing|recovered_predict_ok)
+          state="done"
+          ;;
+        running|in_progress)
+          state="running"
+          ;;
+        pending)
+          state="pending"
+          ;;
+        partial)
           state="partial"
           ;;
         *)
@@ -327,23 +729,148 @@ build_snapshot() {
           ;;
       esac
     else
-      if [[ "${seg_exists}" == "1" || "${anndata_exists}" == "1" || "${xenium_exists}" == "1" ]]; then
+      if [[ "${run_count}" -gt 0 ]] && [[ "${seg_exists}" == "0" ]] && [[ "${running}" == "0" ]]; then
+        state="failed"
+      elif [[ "${seg_exists}" == "1" && "${anndata_exists}" == "1" && "${xenium_exists}" == "1" ]]; then
+        state="done"
+      elif [[ "${seg_exists}" == "1" || "${anndata_exists}" == "1" || "${xenium_exists}" == "1" ]]; then
         state="partial"
       else
         state="pending"
       fi
     fi
+    if [[ "${status}" == "pending" || "${status}" == "running" || "${status}" == "in_progress" || -z "${status}" ]]; then
+      if [[ "${seg_exists}" == "1" && "${anndata_exists}" == "1" && "${xenium_exists}" == "1" ]]; then
+        state="done"
+        if [[ -z "${validate_status}" || "${validate_status}" == "ok" ]]; then
+          status="ok"
+        elif [[ -n "${validate_status}" ]]; then
+          status="${validate_status}"
+        fi
+      elif [[ "${seg_exists}" == "1" || "${anndata_exists}" == "1" || "${xenium_exists}" == "1" ]]; then
+        if [[ "${running}" == "1" ]]; then
+          state="running"
+          status="running"
+        else
+          state="partial"
+          status="partial"
+        fi
+      fi
+    fi
+    if [[ -n "${export_rc}" && "${export_rc}" != "0" ]] && [[ "${anndata_exists}" == "0" || "${xenium_exists}" == "0" ]]; then
+      state="failed"
+      status="export_error"
+    fi
+    if [[ "${seg_exists}" == "0" && "${anndata_exists}" == "0" && "${xenium_exists}" == "0" ]]; then
+      case "${lsf_state}" in
+        RUN|PROV)
+          state="running"
+          status="running"
+          ;;
+        PEND|PSUSP|USUSP|SSUSP|WAIT)
+          if [[ -z "${status}" || "${status}" == "pending" || "${status}" == "running" || "${status}" == "in_progress" ]]; then
+            state="pending"
+            status="pending"
+          fi
+          ;;
+        EXIT|ZOMBI|UNKWN)
+          if [[ -z "${status}" || "${status}" == "pending" || "${status}" == "running" || "${status}" == "in_progress" ]]; then
+            state="failed"
+            status="lsf_exit"
+          fi
+          ;;
+        DONE)
+          if [[ -z "${status}" || "${status}" == "pending" || "${status}" == "running" || "${status}" == "in_progress" ]]; then
+            state="failed"
+            status="missing_segmentation"
+          fi
+          ;;
+      esac
+    fi
+    if [[ "${state}" == "failed" || "${state}" == "partial" ]]; then
+      if [[ -n "${attempt_err_log}" ]]; then
+        log_file="${attempt_err_log}"
+      elif [[ -n "${attempt_out_log}" ]]; then
+        log_file="${attempt_out_log}"
+      fi
+    fi
+    if [[ "${running}" == "1" ]] && [[ "${state}" == "pending" ]]; then
+      state="running"
+    fi
+    if [[ "${state}" == "running" ]] && [[ -z "${status}" ]]; then
+      status="running"
+    elif [[ "${state}" == "failed" ]] && [[ -z "${status}" ]]; then
+      status="missing_segmentation"
+    fi
+    status="$(infer_failure_status_from_log "${log_file}" "${status}")"
 
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    case "${stage_segment_status}" in
+      segment_oom|segment_runlimit|segment_error|predict_oom|predict_runlimit|predict_error)
+        state="failed"
+        status="${stage_segment_status}"
+        ;;
+      segment_ok|predict_ok)
+        case "${stage_export_status}" in
+          export_error)
+            state="failed"
+            status="export_error"
+            ;;
+          export_ok|export_skipped_xenium_missing_source|not_requested)
+            state="done"
+            if [[ -z "${validate_status}" || "${validate_status}" == "ok" ]]; then
+              status="ok"
+            elif [[ -n "${validate_status}" ]]; then
+              status="${validate_status}"
+            fi
+            ;;
+          planned|pending|running)
+            state="running"
+            status="running"
+            ;;
+          "")
+            if [[ "${seg_exists}" == "1" ]]; then
+              state="done"
+              if [[ -z "${validate_status}" || "${validate_status}" == "ok" ]]; then
+                status="ok"
+              elif [[ -n "${validate_status}" ]]; then
+                status="${validate_status}"
+              fi
+            fi
+            ;;
+        esac
+        ;;
+      running)
+        state="running"
+        status="running"
+        ;;
+      pending)
+        if [[ -z "${status}" || "${status}" == "pending" ]]; then
+          state="pending"
+          status="pending"
+        fi
+        ;;
+    esac
+
+    if [[ "${state}" == "failed" || "${state}" == "partial" ]]; then
+      if [[ -n "${attempt_err_log}" ]]; then
+        log_file="${attempt_err_log}"
+      elif [[ -n "${attempt_out_log}" ]]; then
+        log_file="${attempt_out_log}"
+      fi
+    fi
+
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
       "${job}" "${group}" "${gpu}" "${status}" "${state}" "${running}" "${elapsed}" \
       "${run_count}" "${had_rerun}" "${had_anc_retry}" "${had_predict_fallback}" "${had_recovery_pass}" \
       "${seg_exists}" "${anndata_exists}" "${xenium_exists}" "${seg_dir}" "${log_file}" \
       "${use_3d}" "${expansion}" "${tx_max_k}" "${tx_max_dist}" "${n_mid_layers}" "${n_heads}" \
-      "${cells_min_counts}" "${min_qv}" "${alignment_loss}" "${note}" \
+      "${cells_min_counts}" "${min_qv}" "${alignment_loss}" \
+      "${stage_segment_status}" "${stage_export_status}" "${row_segment_job_id}" "${row_export_job_id}" "${stage_export_note}" "${note}" \
       >> "${tmp_file}"
   done
 
   mv "${tmp_file}" "${out_file}"
+  rm -f "${lsf_state_map}"
 }
 
 draw_progress_bar() {
@@ -512,7 +1039,7 @@ colorize_rows_by_status_column() {
 render_dashboard() {
   local snapshot="$1"
   local total done_count running_count pending_count partial_count failed_count
-  local oom_count oot_count anc_count rerun_count recovered_count processed
+  local oom_count runlimit_count anc_count rerun_count recovered_count processed
   local now
 
   total="$(awk 'END { print NR-1 }' "${snapshot}")"
@@ -523,7 +1050,7 @@ render_dashboard() {
   failed_count="$(awk -F'\t' 'NR>1 && $5=="failed" {c++} END{print c+0}' "${snapshot}")"
 
   oom_count="$(awk -F'\t' 'NR>1 && $4 ~ /oom/ {c++} END{print c+0}' "${snapshot}")"
-  oot_count="$(awk -F'\t' 'NR>1 && $4=="segment_oot" {c++} END{print c+0}' "${snapshot}")"
+  runlimit_count="$(awk -F'\t' 'NR>1 && $4 ~ /runlimit/ {c++} END{print c+0}' "${snapshot}")"
   anc_count="$(awk -F'\t' 'NR>1 && ($4=="segment_ancdata" || $10=="1") {c++} END{print c+0}' "${snapshot}")"
   rerun_count="$(awk -F'\t' 'NR>1 && $9=="1" {c++} END{print c+0}' "${snapshot}")"
   recovered_count="$(awk -F'\t' 'NR>1 && ($4=="recovered_predict_ok" || $11=="1" || $12=="1") {c++} END{print c+0}' "${snapshot}")"
@@ -538,7 +1065,7 @@ render_dashboard() {
   echo
   echo
   printf "%b\n" "${C_BLUE}running=${running_count}${C_RESET}  ${C_YELLOW}pending=${pending_count}${C_RESET}  ${C_RED}failed=${failed_count}${C_RESET}  ${C_GREEN}done=${done_count}${C_RESET}  ${C_CYAN}partial=${partial_count}${C_RESET}"
-  printf "oom=%s  oot=%s  ancdata=%s  rerun=%s  recovered=%s\n" "${oom_count}" "${oot_count}" "${anc_count}" "${rerun_count}" "${recovered_count}"
+  printf "oom=%s  runlimit=%s  ancdata=%s  rerun=%s  recovered=%s\n" "${oom_count}" "${runlimit_count}" "${anc_count}" "${rerun_count}" "${recovered_count}"
 
   echo
   echo "State Counts:"
@@ -674,6 +1201,25 @@ render_dashboard() {
       if (index(lower, "stbl_sens_") == 1) return "sensitivity_repeat"
       if (index(lower, "int_") == 1) return "interaction_ablation"
       if (index(lower, "stress_") == 1) return "stress_test"
+      if (lower == "abl_full") return "ablation_anchor"
+      if (index(lower, "abl_sg_") == 1) return "loss_decomposition"
+      if (index(lower, "abl_sgloss_") == 1) return "segmentation_loss"
+      if (index(lower, "abl_aw_") == 1) return "alignment_sweep"
+      if (index(lower, "abl_scale_") == 1) return "scale_factor"
+      if (index(lower, "abl_use3d_") == 1) return "use_3d"
+      if (index(lower, "abl_txk_") == 1) return "graph_neighbors"
+      if (index(lower, "abl_txdist_") == 1) return "graph_radius"
+      if (index(lower, "abl_graph_") == 1) return "graph_density"
+      if (index(lower, "abl_depth_") == 1) return "gnn_depth"
+      if (index(lower, "abl_net_") == 1) return "learnable_params"
+      if (index(lower, "abl_width_") == 1) return "gnn_width"
+      if (index(lower, "abl_heads_") == 1) return "attention_heads"
+      if (index(lower, "abl_no_pos") == 1) return "positional_encoding"
+      if (index(lower, "abl_no_norm") == 1) return "embedding_norm"
+      if (index(lower, "abl_morph") == 1) return "cell_features"
+      if (index(lower, "abl_pred_") == 1) return "prediction_mode"
+      if (index(lower, "abl_frag_") == 1) return "fragments"
+      if (index(lower, "abl_lr_") == 1) return "learning_rate"
       if (index(lower, "use3d_") == 1) return "ablation_use3d"
       if (index(lower, "expansion_") == 1) return "ablation_expansion"
       if (index(lower, "txk_") == 1) return "ablation_txk"
@@ -707,13 +1253,16 @@ render_dashboard() {
     FNR == 1 {
       for (i = 1; i <= NF; i++) idx[$i] = i
       has_block = (("study_block" in idx) && idx["study_block"] > 0) ? 1 : 0
-      print "rank\tjob\tmodel\tstudy_block\tgroup\tstate\tstatus\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss"
+      print "rank\tjob\tmodel\tstudy_block\tgroup\tstate\tstatus\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\tprediction_mode\tfragment_mode"
       next
     }
     {
       job = col("job", $1)
       block = has_block ? col("study_block", "-") : "-"
       group = col("group", "-")
+      if (group == "-" && ("gpu_group" in idx) && idx["gpu_group"] > 0) {
+        group = $(idx["gpu_group"])
+      }
       state = state_by_job[job]
       if (state == "") state = "pending"
       status = status_by_job[job]
@@ -734,13 +1283,15 @@ render_dashboard() {
             col("n_heads", "-") "\t" \
             col("cells_min_counts", "-") "\t" \
             col("min_qv", "-") "\t" \
-            col("alignment_loss", "-")
+            col("alignment_loss", "-") "\t" \
+            col("prediction_mode", "-") "\t" \
+            col("fragment_mode", "-")
     }
   ' "${snapshot}" "${PLAN_FILE}" \
     | {
         IFS= read -r header || true
         if [[ -n "${header}" ]]; then
-          printf "job\tmodel\tstudy_block\tgroup\tstate\tstatus\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\n"
+          printf "job\tmodel\tstudy_block\tgroup\tstate\tstatus\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\tprediction_mode\tfragment_mode\n"
         fi
         sort -t $'\t' -k1,1n -k2,2 \
           | cut -f2-
@@ -751,7 +1302,7 @@ render_dashboard() {
   echo
   echo "Validation Metrics:"
   if [[ -f "${VALIDATION_TSV}" ]] && [[ "$(awk 'END { print NR-1 }' "${VALIDATION_TSV}")" -gt 0 ]]; then
-    awk -F'\t' '
+    awk -F'\t' -v snapshot_file="${snapshot}" -v plan_file="${PLAN_FILE}" -v validation_file="${VALIDATION_TSV}" '
       function has_col(name) {
         return (name in idx) && idx[name] > 0
       }
@@ -778,11 +1329,12 @@ render_dashboard() {
         if (n < 0) n = 0
         return sprintf("%.2f", n)
       }
-      FNR == NR {
+      FILENAME == snapshot_file {
         if (FNR == 1) {
           for (i = 1; i <= NF; i++) {
             if ($i == "job") snap_job_col = i
             if ($i == "state") snap_state_col = i
+            if ($i == "status") snap_status_col = i
             if ($i == "elapsed_s") snap_elapsed_col = i
           }
           next
@@ -790,15 +1342,25 @@ render_dashboard() {
         if (snap_job_col > 0) {
           job_key = $snap_job_col
           if (snap_state_col > 0) state_by_job[job_key] = $snap_state_col
+          if (snap_status_col > 0) status_by_job[job_key] = $snap_status_col
           if (snap_elapsed_col > 0) elapsed_by_job[job_key] = $snap_elapsed_col
         }
         next
       }
-      FNR == 1 {
+      FILENAME == plan_file {
+        if (FNR > 1 && $1 != "") {
+          planned[$1] = 1
+        }
+        next
+      }
+      FILENAME == validation_file && FNR == 1 {
         for (i = 1; i <= NF; i++) {
           idx[$i] = i
         }
-        print "job\tkind\tstate\tvalidate_status\tgpu_time_min v\tcells\tassigned_pct ^\tmecr v\tcontamination_pct v\tresolvi_contam_pct v\ttco ^\tdoublet_pct v"
+        print "job\tkind\tst\tval\tgpu_m v\tcells\tfrag\tasg% ^\tmecr v\tbdr% v\trslv v\ttco ^\tvsi% v"
+        next
+      }
+      FILENAME != validation_file {
         next
       }
       {
@@ -807,6 +1369,16 @@ render_dashboard() {
         group = get_col("group")
         is_reference = get_col("is_reference")
         reference_kind = get_col("reference_kind")
+        is_reference_row = 0
+        if (reference_kind != "" && reference_kind != "-") {
+          is_reference_row = 1
+        } else if (is_reference == "1" || group == "R") {
+          is_reference_row = 1
+        }
+        if (!(job in planned) && is_reference_row == 0) {
+          next
+        }
+        snapshot_status = status_by_job[job]
         if (reference_kind != "" && reference_kind != "-") {
           kind = reference_kind
         } else if (is_reference == "1" || group == "R") {
@@ -827,6 +1399,14 @@ render_dashboard() {
 
         validate_status = get_col("validate_status")
         if (validate_status == "") validate_status = "<none>"
+        if (kind == "segger") {
+          lower_validate = tolower(validate_status)
+          lower_snapshot = tolower(snapshot_status)
+          if ((lower_validate == "missing_segmentation" || lower_validate == "recovery_no_checkpoint") &&
+              snapshot_status != "" && lower_snapshot != "missing_segmentation" && lower_snapshot != "recovery_no_checkpoint") {
+            validate_status = snapshot_status
+          }
+        }
 
         gpu_time = get_col("gpu_time_s")
         if (gpu_time == "") gpu_time = get_col("elapsed_s")
@@ -834,9 +1414,15 @@ render_dashboard() {
         gpu_time = fmt_minutes(gpu_time)
 
         cells = get_col("cells")
-        if (cells == "") cells = get_col("cells_total")
+        if (cells == "") cells = get_col("cells_non_fragment_total")
         if (cells == "") cells = get_col("cells_assigned")
+        if (cells == "") cells = get_col("cells_total")
         cells = fmt_nonneg_int(cells)
+
+        fragments = get_col("fragments")
+        if (fragments == "") fragments = get_col("fragments_total")
+        if (fragments == "") fragments = get_col("fragments_assigned")
+        fragments = fmt_nonneg_int(fragments)
 
         assigned = get_col("assigned_pct")
         if (assigned == "") assigned = get_col("transcripts_assigned_pct")
@@ -855,17 +1441,19 @@ render_dashboard() {
 
         doublet = get_col("doublet_pct")
         if (doublet == "") {
-          doublet = get_col("signal_doublet_like_fraction_fast")
+          doublet = get_col("vsi_doublet_fraction_fast")
+          if (doublet == "") doublet = get_col("signal_hotspot_doublet_fraction_fast")
+          if (doublet == "") doublet = get_col("signal_doublet_like_fraction_fast")
           if (doublet != "" && tolower(doublet) != "nan" && tolower(doublet) != "none") {
             doublet = 100.0 * (doublet + 0.0)
           }
         }
 
-        print job_disp "\t" kind "\t" state "\t" validate_status "\t" gpu_time "\t" cells "\t" \
+        print job_disp "\t" kind "\t" state "\t" validate_status "\t" gpu_time "\t" cells "\t" fragments "\t" \
               fmt_float(assigned) "\t" fmt_float(mecr) "\t" fmt_float(contamination) "\t" \
               fmt_float(resolvi) "\t" fmt_float(tco) "\t" fmt_float(doublet)
       }
-    ' "${snapshot}" "${VALIDATION_TSV}" \
+    ' "${snapshot}" "${PLAN_FILE}" "${VALIDATION_TSV}" \
       | {
           IFS= read -r header || true
           if [[ -n "${header}" ]]; then
@@ -908,24 +1496,22 @@ render_dashboard() {
             function is_top2_up(v, best1, best2, have_2,    x) {
               if (!is_num(v) || !is_num(best1)) return 0
               x = to_num(v)
-              if (!have_2) return (x == best1)
+              if (!have_2) return (x >= best1)
               return (x >= best2)
             }
             function is_top2_down(v, best1, best2, have_2,    x) {
               if (!is_num(v) || !is_num(best1)) return 0
               x = to_num(v)
-              if (!have_2) return (x == best1)
+              if (!have_2) return (x <= best1)
               return (x <= best2)
             }
-            function norm_up(v, lo, hi) {
-              if (!is_num(v)) return ""
-              if (hi <= lo) return 1.0
-              return (to_num(v) - lo) / (hi - lo)
+            function sort_key_up(v) {
+              if (!is_num(v)) return 1e12
+              return -to_num(v)
             }
-            function norm_down(v, lo, hi) {
-              if (!is_num(v)) return ""
-              if (hi <= lo) return 1.0
-              return (hi - to_num(v)) / (hi - lo)
+            function sort_key_down(v) {
+              if (!is_num(v)) return 1e12
+              return to_num(v)
             }
             {
               n++
@@ -933,139 +1519,95 @@ render_dashboard() {
                 cell[n, j] = $j
               }
               nf[n] = NF
-              m_assigned[n] = $7
-              m_mecr[n] = $8
-              m_contam[n] = $9
-              m_resolvi[n] = $10
-              m_tco[n] = $11
-              m_doublet[n] = $12
+              m_assigned[n] = $8
+              m_mecr[n] = $9
+              m_border[n] = $10
+              m_resolvi[n] = $11
+              m_tco[n] = $12
+              m_doublet[n] = $13
               m_gpu[n] = $5
               st[n] = tolower($4)
               is_ref[n] = (tolower($3) == "reference")
 
-              if (is_num($7)) {
-                v = to_num($7)
-                if (!has_a || v < min_a) min_a = v
-                if (!has_a || v > max_a) max_a = v
-                has_a = 1
-              }
-              if (is_num($8)) {
-                v = to_num($8)
-                if (!has_m || v < min_m) min_m = v
-                if (!has_m || v > max_m) max_m = v
-                has_m = 1
-              }
-              if (is_num($9)) {
-                v = to_num($9)
-                if (!has_c || v < min_c) min_c = v
-                if (!has_c || v > max_c) max_c = v
-                has_c = 1
-              }
-              if (is_num($10)) {
-                v = to_num($10)
-                if (!has_r || v < min_r) min_r = v
-                if (!has_r || v > max_r) max_r = v
-                has_r = 1
-              }
-              if (is_num($11)) {
-                v = to_num($11)
-                if (!has_t || v < min_t) min_t = v
-                if (!has_t || v > max_t) max_t = v
-                has_t = 1
-              }
-              if (is_num($12)) {
-                v = to_num($12)
-                if (!has_d || v < min_d) min_d = v
-                if (!has_d || v > max_d) max_d = v
-                has_d = 1
-              }
-
-              if (st[n] == "ok") {
+              if (!is_ref[n] && st[n] == "ok") {
                 have1 = have_a_best1; top1 = a_best1; have2 = have_a_best2; top2 = a_best2
-                update_top2_up($7)
+                update_top2_up($8)
                 have_a_best1 = have1; a_best1 = top1; have_a_best2 = have2; a_best2 = top2
 
                 have1 = have_m_best1; top1 = m_best1; have2 = have_m_best2; top2 = m_best2
-                update_top2_down($8)
+                update_top2_down($9)
                 have_m_best1 = have1; m_best1 = top1; have_m_best2 = have2; m_best2 = top2
 
-                have1 = have_c_best1; top1 = c_best1; have2 = have_c_best2; top2 = c_best2
-                update_top2_down($9)
-                have_c_best1 = have1; c_best1 = top1; have_c_best2 = have2; c_best2 = top2
+                have1 = have_b_best1; top1 = b_best1; have2 = have_b_best2; top2 = b_best2
+                update_top2_down($10)
+                have_b_best1 = have1; b_best1 = top1; have_b_best2 = have2; b_best2 = top2
 
                 have1 = have_r_best1; top1 = r_best1; have2 = have_r_best2; top2 = r_best2
-                update_top2_down($10)
+                update_top2_down($11)
                 have_r_best1 = have1; r_best1 = top1; have_r_best2 = have2; r_best2 = top2
 
                 have1 = have_t_best1; top1 = t_best1; have2 = have_t_best2; top2 = t_best2
-                update_top2_up($11)
+                update_top2_up($12)
                 have_t_best1 = have1; t_best1 = top1; have_t_best2 = have2; t_best2 = top2
 
                 have1 = have_d_best1; top1 = d_best1; have2 = have_d_best2; top2 = d_best2
-                update_top2_down($12)
+                update_top2_down($13)
                 have_d_best1 = have1; d_best1 = top1; have_d_best2 = have2; d_best2 = top2
 
-                if (!is_ref[n]) {
-                  have1 = have_g_best1; top1 = g_best1; have2 = have_g_best2; top2 = g_best2
-                  update_top2_down($5)
-                  have_g_best1 = have1; g_best1 = top1; have_g_best2 = have2; g_best2 = top2
-                }
+                have1 = have_g_best1; top1 = g_best1; have2 = have_g_best2; top2 = g_best2
+                update_top2_down($5)
+                have_g_best1 = have1; g_best1 = top1; have_g_best2 = have2; g_best2 = top2
               }
             }
             END {
               for (i = 1; i <= n; i++) {
-                # Rank rows by overall score across assigned/mecr/contam/tco/doublet.
-                # Rows with no numeric metrics (or non-ok status) stay at the bottom.
-                if (st[i] != "ok") {
-                  score = -1e9
-                } else {
-                  score = 0.0
-                  cnt = 0
-
-                  s = norm_up(m_assigned[i], min_a, max_a)
-                  if (s != "") { score += s; cnt++ }
-
-                  s = norm_down(m_mecr[i], min_m, max_m)
-                  if (s != "") { score += s; cnt++ }
-
-                  s = norm_down(m_contam[i], min_c, max_c)
-                  if (s != "") { score += s; cnt++ }
-
-                  s = norm_up(m_tco[i], min_t, max_t)
-                  if (s != "") { score += s; cnt++ }
-
-                  s = norm_down(m_doublet[i], min_d, max_d)
-                  if (s != "") { score += s; cnt++ }
-
-                  if (cnt > 0) {
-                    score /= cnt
-                  } else {
-                    score = -1e9
-                  }
-                }
-
                 if (b_on != "" && st[i] == "ok") {
                   if (!is_ref[i] && is_top2_down(m_gpu[i], g_best1, g_best2, have_g_best2)) cell[i, 5] = b_on cell[i, 5] b_off
-                  if (is_top2_up(m_assigned[i], a_best1, a_best2, have_a_best2)) cell[i, 7] = b_on cell[i, 7] b_off
-                  if (is_top2_down(m_mecr[i], m_best1, m_best2, have_m_best2)) cell[i, 8] = b_on cell[i, 8] b_off
-                  if (is_top2_down(m_contam[i], c_best1, c_best2, have_c_best2)) cell[i, 9] = b_on cell[i, 9] b_off
-                  if (is_top2_down(m_resolvi[i], r_best1, r_best2, have_r_best2)) cell[i, 10] = b_on cell[i, 10] b_off
-                  if (is_top2_up(m_tco[i], t_best1, t_best2, have_t_best2)) cell[i, 11] = b_on cell[i, 11] b_off
-                  if (is_top2_down(m_doublet[i], d_best1, d_best2, have_d_best2)) cell[i, 12] = b_on cell[i, 12] b_off
+                  if (is_top2_up(m_assigned[i], a_best1, a_best2, have_a_best2)) cell[i, 8] = b_on cell[i, 8] b_off
+                  if (is_top2_down(m_mecr[i], m_best1, m_best2, have_m_best2)) cell[i, 9] = b_on cell[i, 9] b_off
+                  if (is_top2_down(m_border[i], b_best1, b_best2, have_b_best2)) cell[i, 10] = b_on cell[i, 10] b_off
+                  if (is_top2_down(m_resolvi[i], r_best1, r_best2, have_r_best2)) cell[i, 11] = b_on cell[i, 11] b_off
+                  if (is_top2_up(m_tco[i], t_best1, t_best2, have_t_best2)) cell[i, 12] = b_on cell[i, 12] b_off
+                  if (is_top2_down(m_doublet[i], d_best1, d_best2, have_d_best2)) cell[i, 13] = b_on cell[i, 13] b_off
+                }
+
+                if (is_ref[i]) {
+                  bucket = 0
+                  k_assigned = 0
+                  k_mecr = 0
+                  k_border = 0
+                  k_resolvi = 0
+                  k_tco = 0
+                  k_doublet = 0
+                } else if (st[i] == "ok") {
+                  bucket = 1
+                  k_assigned = sort_key_up(m_assigned[i])
+                  k_mecr = sort_key_down(m_mecr[i])
+                  k_border = sort_key_down(m_border[i])
+                  k_resolvi = sort_key_down(m_resolvi[i])
+                  k_tco = sort_key_up(m_tco[i])
+                  k_doublet = sort_key_down(m_doublet[i])
+                } else {
+                  bucket = 2
+                  k_assigned = 1e12
+                  k_mecr = 1e12
+                  k_border = 1e12
+                  k_resolvi = 1e12
+                  k_tco = 1e12
+                  k_doublet = 1e12
                 }
 
                 row = cell[i, 1]
                 for (j = 2; j <= nf[i]; j++) {
                   row = row "\t" cell[i, j]
                 }
-                gkey = 1
-                if (tolower(cell[i, 3]) == "reference") gkey = 0
-                printf "%d\t%.10f\t%s\n", gkey, score, row
+                printf "%d\t%.10f\t%.10f\t%.10f\t%.10f\t%.10f\t%.10f\t%08d\t%s\n", \
+                  bucket, k_assigned, k_mecr, k_border, k_resolvi, k_tco, k_doublet, i, row
               }
             }
           ' \
-            | sort -t $'\t' -k1,1n -k2,2gr -k3,3 \
-            | cut -f3- \
+            | sort -t $'\t' -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n -k6,6n -k7,7n -k8,8n \
+            | cut -f9- \
             | awk -F'\t' '
                 {
                   state = tolower($3)
@@ -1099,7 +1641,7 @@ render_dashboard() {
       BEGIN {
         print "job\tgpu\tstatus\tstate\truns\tlog_file"
       }
-      NR > 1 && $6 == "1" {
+      NR > 1 && $5 == "running" {
         st = $4
         if (st == "") st = "<none>"
         print $1 "\t" $3 "\t" st "\t" $5 "\t" $8 "\t" $17
@@ -1120,6 +1662,23 @@ render_dashboard() {
         st = $4
         if (st == "") st = "<none>"
         print $1 "\t" $3 "\t" st "\t" $5 "\t" $8 "\t" $9 "\t" $17
+      }
+    ' "${snapshot}" \
+      | colorize_rows_by_state_column 4 \
+      | render_tsv_table
+  fi
+
+  if [[ "${partial_count}" -gt 0 ]]; then
+    echo
+    echo "Partial Jobs:"
+    awk -F'\t' '
+      BEGIN {
+        print "job\tgpu\tstatus\tstate\truns\tseg\tanndata\txenium\tlog_file"
+      }
+      NR > 1 && $5 == "partial" {
+        st = $4
+        if (st == "") st = "<none>"
+        print $1 "\t" $3 "\t" st "\t" $5 "\t" $8 "\t" $13 "\t" $14 "\t" $15 "\t" $17
       }
     ' "${snapshot}" \
       | colorize_rows_by_state_column 4 \

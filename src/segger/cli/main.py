@@ -1,3 +1,4 @@
+import os
 from cyclopts import App, Parameter, Group, validators
 from typing import Annotated, Literal
 from pathlib import Path
@@ -153,6 +154,20 @@ def _resolve_use_3d_flag(use_3d: Literal["auto", "true", "false"]) -> bool | str
     if use_3d == "auto":
         return "auto"
     return use_3d == "true"
+
+
+_DEFAULT_REFERENCE_CACHE_DIRNAME = ".segger_references"
+
+
+def _resolve_reference_cache_dir(cache_dir: Path | None) -> Path:
+    """Resolve reference-cache directory for atlas-backed CLI options."""
+    if cache_dir is not None:
+        return Path(cache_dir)
+    env_cache = os.environ.get("SEGGER_REFERENCE_CACHE_DIR")
+    if env_cache:
+        return Path(env_cache)
+    return Path.cwd() / _DEFAULT_REFERENCE_CACHE_DIRNAME
+
 
 def _load_checkpoint_datamodule_hparams(checkpoint_path: Path) -> dict:
     """Load datamodule kwargs from checkpoint metadata."""
@@ -445,7 +460,8 @@ def segment(
     )] = None,
     reference_cache_dir: Annotated[Path | None, Parameter(
         help="Cache directory for auto-fetched scRNA references (used with --tissue-type). "
-             "Defaults to <output-directory>/.segger_references.",
+             "Defaults to ./.segger_references in current working directory "
+             "(or $SEGGER_REFERENCE_CACHE_DIR).",
         group=group_loss,
     )] = None,
 
@@ -509,11 +525,7 @@ def segment(
         )
     if tissue_type:
         from ..data.atlas import fetch_reference as _fetch_ref
-        resolved_reference_cache_dir = (
-            Path(reference_cache_dir)
-            if reference_cache_dir is not None
-            else (Path(output_directory) / ".segger_references")
-        )
+        resolved_reference_cache_dir = _resolve_reference_cache_dir(reference_cache_dir)
         _ref = _fetch_ref(tissue_type, cache_dir=resolved_reference_cache_dir)
         scrna_reference_path = _ref.h5ad_path
         scrna_celltype_column = "cell_type"
@@ -1128,7 +1140,8 @@ def validate(
     )] = None,
     reference_cache_dir: Annotated[Path | None, Parameter(
         help="Cache directory for auto-fetched scRNA references (used with --tissue-type). "
-             "Defaults to ./.segger_references in current working directory.",
+             "Defaults to ./.segger_references in current working directory "
+             "(or $SEGGER_REFERENCE_CACHE_DIR).",
         group=group_validation_inputs,
     )] = None,
     assigned: Annotated[bool, Parameter(
@@ -1259,11 +1272,7 @@ def validate(
         )
     if tissue_type:
         from ..data.atlas import fetch_reference as _fetch_ref
-        resolved_reference_cache_dir = (
-            Path(reference_cache_dir)
-            if reference_cache_dir is not None
-            else (Path.cwd() / ".segger_references")
-        )
+        resolved_reference_cache_dir = _resolve_reference_cache_dir(reference_cache_dir)
         _ref = _fetch_ref(tissue_type, cache_dir=resolved_reference_cache_dir)
         scrna_reference_path = _ref.h5ad_path
         scrna_celltype_column = "cell_type"
@@ -1925,37 +1934,45 @@ def fetch(
         group=group_atlas,
     )],
     organism: Annotated[str, Parameter(
-        help="Census organism string.",
+        help="Census organism (e.g. homo_sapiens, mus_musculus; aliases like "
+             "human/mouse and common typos are accepted).",
         group=group_atlas,
     )] = "homo_sapiens",
-    census_version: Annotated[str, Parameter(
-        help="Census release version.",
-        group=group_atlas,
-    )] = "stable",
     max_cells_per_type: Annotated[int, Parameter(
         help="Maximum cells per cell type (stratified subsample).",
         validator=validators.Number(gt=0),
         group=group_atlas,
     )] = 1000,
-    force: Annotated[bool, Parameter(
-        help="Re-download even if already cached.",
+    min_cells_per_type: Annotated[int, Parameter(
+        help="Minimum cells required per cell-type group.",
+        validator=validators.Number(gte=1),
         group=group_atlas,
-    )] = False,
+    )] = 100,
+    n_top_cell_types: Annotated[int | None, Parameter(
+        help="Optional cap on top cell-type groups to keep.",
+        validator=validators.Number(gte=1),
+        group=group_atlas,
+    )] = None,
     cache_dir: Annotated[Path | None, Parameter(
-        help="Directory for cached references. Defaults to ./.segger_references in current working directory.",
+        help="Directory for cached references. Defaults to ./.segger_references "
+             "in current working directory (or $SEGGER_REFERENCE_CACHE_DIR).",
         group=group_atlas,
     )] = None,
 ):
     """Fetch a tissue-specific scRNA-seq reference from CellxGENE Census."""
     from ..data.atlas import fetch_reference
-    resolved_cache_dir = Path(cache_dir) if cache_dir is not None else (Path.cwd() / ".segger_references")
+    resolved_cache_dir = _resolve_reference_cache_dir(cache_dir)
     ref = fetch_reference(
         tissue,
         cache_dir=resolved_cache_dir,
         organism=organism,
-        census_version=census_version,
         max_cells_per_type=max_cells_per_type,
-        force=force,
+        min_cells_per_type=min_cells_per_type,
+        max_cell_types=n_top_cell_types,
+        coarse_cell_types=True,
+        exclude_unknown=True,
+        drop_unknown_cell_types=True,
+        drop_other_cell_types=True,
         progress=True,
     )
     print(f"Tissue:       {ref.tissue}")
@@ -1966,16 +1983,81 @@ def fetch(
     print(f"Cached at:    {ref.h5ad_path}")
 
 
+@atlas_app.command
+def preview(
+    tissue: Annotated[str, Parameter(
+        help="Tissue type to preview (e.g. 'colon', 'breast', 'brain').",
+        group=group_atlas,
+    )],
+    organism: Annotated[str, Parameter(
+        help="Census organism (e.g. homo_sapiens, mus_musculus; aliases like "
+             "human/mouse and common typos are accepted).",
+        group=group_atlas,
+    )] = "homo_sapiens",
+    n_top_cell_types: Annotated[int, Parameter(
+        help="Number of top cell-type groups to show/use.",
+        validator=validators.Number(gt=0),
+        group=group_atlas,
+    )] = 15,
+    min_cells_per_type: Annotated[int, Parameter(
+        help="Minimum cells required per cell-type group.",
+        validator=validators.Number(gte=1),
+        group=group_atlas,
+    )] = 100,
+):
+    """Preview tissue cell-type composition before downloading expression matrix."""
+    from ..data.atlas import preview_reference_cell_types
+
+    summary = preview_reference_cell_types(
+        tissue=tissue,
+        organism=organism,
+        min_cells_per_type=min_cells_per_type,
+        max_cell_types=n_top_cell_types,
+        coarse_cell_types=True,
+        exclude_unknown=True,
+        drop_unknown_cell_types=True,
+        drop_other_cell_types=True,
+        top_n=n_top_cell_types,
+        progress=True,
+    )
+
+    print(f"Tissue:         {summary['tissue']}")
+    print(f"Organism:       {summary['organism']}")
+    print(f"Census version: {summary['census_version']}")
+    print(f"Total cells:    {summary['n_cells']:,}")
+    print(f"Before drops:   {summary['n_cells_before_drop']:,}")
+    print(f"Cell types:     {summary['n_raw_cell_types']}")
+    print(f"Min cells/type: {summary['min_cells_per_type']}")
+    print(f"Coarse labels:  {summary['coarse_cell_types']}")
+    print(f"Exclude unknown:{summary['exclude_unknown']}")
+    print(f"Effective excl: {summary['effective_exclude_unknown']}")
+    print(f"Drop unknown:   {summary['drop_unknown_cell_types']}")
+    print(f"Drop other:     {summary['drop_other_cell_types']}")
+    print(f"Metadata-first: {summary['metadata_prefiltered']}")
+    print(f"Dropped unknown:{summary['dropped_unknown_cells']:,}")
+    print(f"Dropped other:  {summary['dropped_other_cells']:,}")
+    print(f"Kept fraction:  {summary['kept_fraction']:.3f}")
+    print(f"Mapping mode:   {summary['coarse_mapping_mode']}")
+    print("Top cell types:")
+    for name, count in summary["raw_top_cell_types"]:
+        print(f"  - {name:<40s} {int(count):>10,}")
+
+    print(f"Selected categories (max {n_top_cell_types}):")
+    for name, count in summary["selected_cell_type_counts"]:
+        print(f"  - {name:<40s} {int(count):>10,}")
+
+
 @atlas_app.command(name="list")
 def list_refs(
     cache_dir: Annotated[Path | None, Parameter(
-        help="Directory for cached references. Defaults to ./.segger_references in current working directory.",
+        help="Directory for cached references. Defaults to ./.segger_references "
+             "in current working directory (or $SEGGER_REFERENCE_CACHE_DIR).",
         group=group_atlas,
     )] = None,
 ):
     """List all locally cached scRNA-seq references."""
     from ..data.atlas import list_cached_references
-    resolved_cache_dir = Path(cache_dir) if cache_dir is not None else (Path.cwd() / ".segger_references")
+    resolved_cache_dir = _resolve_reference_cache_dir(cache_dir)
     refs = list_cached_references(cache_dir=resolved_cache_dir)
     if not refs:
         print(f"No cached references found in: {resolved_cache_dir}")
@@ -1996,13 +2078,14 @@ def clear(
         group=group_atlas,
     )] = None,
     cache_dir: Annotated[Path | None, Parameter(
-        help="Directory for cached references. Defaults to ./.segger_references in current working directory.",
+        help="Directory for cached references. Defaults to ./.segger_references "
+             "in current working directory (or $SEGGER_REFERENCE_CACHE_DIR).",
         group=group_atlas,
     )] = None,
 ):
     """Remove cached scRNA-seq references."""
     from ..data.atlas import clear_cache
-    resolved_cache_dir = Path(cache_dir) if cache_dir is not None else (Path.cwd() / ".segger_references")
+    resolved_cache_dir = _resolve_reference_cache_dir(cache_dir)
     removed = clear_cache(tissue=tissue, cache_dir=resolved_cache_dir)
     if removed == 0:
         print(f"Nothing to remove in: {resolved_cache_dir}")

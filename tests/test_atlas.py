@@ -50,6 +50,27 @@ atlas = _load_atlas_module()
 
 
 # ---------------------------------------------------------------------------
+# Cache directory resolution
+# ---------------------------------------------------------------------------
+
+class TestCacheDirResolution:
+    def test_explicit_cache_dir_wins(self, tmp_path, monkeypatch):
+        explicit = tmp_path / "explicit_cache"
+        monkeypatch.setenv("SEGGER_REFERENCE_CACHE_DIR", str(tmp_path / "env_cache"))
+        assert atlas._get_cache_dir(explicit) == explicit
+
+    def test_env_var_used_when_no_explicit_cache_dir(self, tmp_path, monkeypatch):
+        env_cache = tmp_path / "env_cache"
+        monkeypatch.setenv("SEGGER_REFERENCE_CACHE_DIR", str(env_cache))
+        assert atlas._get_cache_dir() == env_cache
+
+    def test_default_uses_cwd_segger_references(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SEGGER_REFERENCE_CACHE_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert atlas._get_cache_dir() == (tmp_path / ".segger_references")
+
+
+# ---------------------------------------------------------------------------
 # Tissue normalization
 # ---------------------------------------------------------------------------
 
@@ -84,6 +105,28 @@ class TestNormalizeTissue:
 
 
 # ---------------------------------------------------------------------------
+# Organism normalization
+# ---------------------------------------------------------------------------
+
+class TestNormalizeOrganism:
+    def test_known_aliases(self):
+        assert atlas._normalize_organism("human") == "homo_sapiens"
+        assert atlas._normalize_organism("homo sapiens") == "homo_sapiens"
+        assert atlas._normalize_organism("homo_sapiens") == "homo_sapiens"
+        assert atlas._normalize_organism("homosapiense") == "homo_sapiens"
+        assert atlas._normalize_organism("mouse") == "mus_musculus"
+        assert atlas._normalize_organism("mus musculus") == "mus_musculus"
+
+    def test_typo_suggests_match(self):
+        with pytest.raises(ValueError, match="Did you mean"):
+            atlas._normalize_organism("homo sapens")
+
+    def test_unknown_raises_with_valid_list(self):
+        with pytest.raises(ValueError, match="Valid organisms"):
+            atlas._normalize_organism("alien")
+
+
+# ---------------------------------------------------------------------------
 # Immune-only detection
 # ---------------------------------------------------------------------------
 
@@ -105,6 +148,110 @@ class TestImmuneOnlyGuess:
     def test_non_immune_only(self):
         # Only non-immune keywords → not immune-only (no immune evidence)
         assert atlas._immune_only_guess(["Neuron", "Astrocyte"]) is False
+
+
+# ---------------------------------------------------------------------------
+# Cell-type category capping
+# ---------------------------------------------------------------------------
+
+class TestCapCellTypeCounts:
+    def test_no_cap_returns_original(self):
+        counts = [("A", 10), ("B", 7), ("C", 2)]
+        kept, display = atlas._cap_cell_type_counts(counts, None)
+        assert kept == ["A", "B", "C"]
+        assert display == counts
+
+    def test_cap_merges_tail_into_other(self):
+        counts = [("A", 10), ("B", 7), ("C", 5), ("D", 3)]
+        kept, display = atlas._cap_cell_type_counts(counts, 3)
+        assert kept == ["A", "B"]
+        assert display == [("A", 10), ("B", 7), ("Other", 8)]
+
+    def test_cap_one_is_only_other(self):
+        counts = [("A", 10), ("B", 7), ("C", 5)]
+        kept, display = atlas._cap_cell_type_counts(counts, 1)
+        assert kept == []
+        assert display == [("Other", 22)]
+
+    def test_invalid_cap_raises(self):
+        with pytest.raises(ValueError, match="max_cell_types must be >= 1"):
+            atlas._cap_cell_type_counts([("A", 1)], 0)
+
+    def test_cap_without_other_keeps_exact_top_n(self):
+        counts = [("A", 10), ("B", 7), ("C", 5), ("D", 3)]
+        kept, display = atlas._cap_cell_type_counts(counts, 3, include_other=False)
+        assert kept == ["A", "B", "C"]
+        assert display == [("A", 10), ("B", 7), ("C", 5)]
+
+
+# ---------------------------------------------------------------------------
+# Cell-type coarse mapping
+# ---------------------------------------------------------------------------
+
+class TestCellTypeMapping:
+    def test_load_mapping_with_named_columns(self, tmp_path):
+        mapping_file = tmp_path / "map.csv"
+        mapping_file.write_text(
+            "cell_type,coarse_cell_type\n"
+            "T cell,Immune\n"
+            "B cell,Immune\n"
+            "Enterocyte,Epithelial\n",
+            encoding="utf-8",
+        )
+        mapping = atlas._load_cell_type_mapping(mapping_file)
+        assert mapping["T cell"] == "Immune"
+        assert mapping["Enterocyte"] == "Epithelial"
+
+    def test_load_mapping_uses_first_two_columns_as_fallback(self, tmp_path):
+        mapping_file = tmp_path / "map.tsv"
+        mapping_file.write_text(
+            "fine_label\tbroad_label\n"
+            "Fibroblast\tStromal\n",
+            encoding="utf-8",
+        )
+        mapping = atlas._load_cell_type_mapping(mapping_file)
+        assert mapping == {"Fibroblast": "Stromal"}
+
+    def test_apply_mapping_defaults_unmapped_to_other(self):
+        pd = pytest.importorskip("pandas")
+        series = pd.Series(["T cell", "Unknown subtype", None], dtype="string")
+        mapping = {"T cell": "Immune"}
+        out = atlas._apply_cell_type_mapping(series, mapping)
+        assert out.tolist() == ["Immune", "Other", "Other"]
+
+    def test_auto_coarse_mapping_keywords(self):
+        assert atlas._auto_coarse_cell_type_label("CD4-positive, alpha-beta T cell") == "T/NK/ILC"
+        assert atlas._auto_coarse_cell_type_label("alveolar macrophage") == "Myeloid"
+        assert atlas._auto_coarse_cell_type_label("capillary endothelial cell") == "Endothelial"
+        assert atlas._auto_coarse_cell_type_label("transit amplifying cell") == "Stem/Progenitor"
+        assert atlas._auto_coarse_cell_type_label("goblet cell") == "Epithelial"
+        assert atlas._auto_coarse_cell_type_label("tuft cell of colon") == "Epithelial"
+        assert atlas._auto_coarse_cell_type_label("unknown") == "Unknown"
+
+    def test_cell_type_drop_mask_drops_unknown_and_other(self):
+        pd = pytest.importorskip("pandas")
+        series = pd.Series(["Unknown", "Other", "T cell"], dtype="string")
+        mask = atlas._cell_type_drop_mask(
+            series,
+            drop_unknown=True,
+            drop_other=True,
+        )
+        assert mask.tolist() == [True, True, False]
+
+    def test_filter_cell_types_by_min_count(self):
+        pd = pytest.importorskip("pandas")
+        df = pd.DataFrame(
+            {
+                "soma_joinid": [1, 2, 3, 4, 5, 6],
+                "cell_type": ["A", "A", "A", "B", "B", "C"],
+            }
+        )
+        out, dropped = atlas._filter_cell_types_by_min_count(
+            df,
+            min_cells_per_type=3,
+        )
+        assert set(out["cell_type"].unique().tolist()) == {"A"}
+        assert dropped == [("B", 2), ("C", 1)]
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +330,12 @@ class TestFetchReferenceCached:
             "n_cell_types": 8,
             "cell_type_column": "cell_type",
             "immune_only": False,
+            "coarse_cell_types": False,
+            "exclude_unknown": False,
+            "effective_exclude_unknown": False,
+            "drop_unknown_cell_types": False,
+            "drop_other_cell_types": False,
+            "metadata_prefiltered": False,
         }), encoding="utf-8")
 
         # Patch _require_census so we know it isn't called
@@ -193,6 +346,88 @@ class TestFetchReferenceCached:
         assert ref.h5ad_path == h5ad
         assert ref.tissue == normalized
         assert ref.n_obs == 500
+
+    def test_organism_alias_hits_same_cache(self, tmp_path):
+        tissue = "breast"
+        normalized = atlas._normalize_tissue(tissue)
+        safe = normalized.replace(" ", "_")
+        tissue_dir = tmp_path / "homo_sapiens" / safe
+        tissue_dir.mkdir(parents=True)
+
+        h5ad = tissue_dir / f"{safe}.h5ad"
+        h5ad.write_bytes(b"fake h5ad content")
+        meta = tissue_dir / f"{safe}.json"
+        meta.write_text(json.dumps({
+            "h5ad_path": str(h5ad),
+            "tissue": normalized,
+            "organism": "homo_sapiens",
+            "census_version": "stable",
+            "n_obs": 500,
+            "n_cell_types": 8,
+            "cell_type_column": "cell_type",
+            "immune_only": False,
+            "coarse_cell_types": False,
+            "exclude_unknown": False,
+            "effective_exclude_unknown": False,
+            "drop_unknown_cell_types": False,
+            "drop_other_cell_types": False,
+            "metadata_prefiltered": False,
+        }), encoding="utf-8")
+
+        with mock.patch.object(atlas, "_require_census") as mock_census:
+            ref = atlas.fetch_reference(tissue, organism="human", cache_dir=tmp_path)
+
+        mock_census.assert_not_called()
+        assert ref.h5ad_path == h5ad
+        assert ref.organism == "homo_sapiens"
+
+    def test_cache_rebuilds_when_mapping_option_changes(self, tmp_path):
+        tissue = "breast"
+        normalized = atlas._normalize_tissue(tissue)
+        safe = normalized.replace(" ", "_")
+        tissue_dir = tmp_path / "homo_sapiens" / safe
+        tissue_dir.mkdir(parents=True)
+
+        h5ad = tissue_dir / f"{safe}.h5ad"
+        h5ad.write_bytes(b"fake h5ad content")
+
+        meta = tissue_dir / f"{safe}.json"
+        meta.write_text(json.dumps({
+            "h5ad_path": str(h5ad),
+            "tissue": normalized,
+            "organism": "homo_sapiens",
+            "census_version": "stable",
+            "n_obs": 500,
+            "n_cell_types": 8,
+            "cell_type_column": "cell_type",
+            "immune_only": False,
+            "max_cells_per_type": 1000,
+            "min_cells_per_type": 1,
+            "max_cell_types": None,
+            "coarse_cell_types": False,
+            "exclude_unknown": False,
+            "effective_exclude_unknown": False,
+            "drop_unknown_cell_types": False,
+            "drop_other_cell_types": False,
+            "metadata_prefiltered": False,
+            "cell_type_map_path": None,
+        }), encoding="utf-8")
+
+        mapping_file = tmp_path / "coarse_map.csv"
+        mapping_file.write_text(
+            "cell_type,coarse\nT cell,Immune\n",
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(atlas, "_require_census", side_effect=RuntimeError("rebuild")) as mock_census:
+            with pytest.raises(RuntimeError, match="rebuild"):
+                atlas.fetch_reference(
+                    tissue,
+                    cache_dir=tmp_path,
+                    cell_type_map_path=mapping_file,
+                )
+
+        mock_census.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +551,33 @@ class TestGetAnndataCompatibility:
         assert len(calls) == 2
         assert "obs_column_names" in calls[0]
         assert "column_names" in calls[1]
+
+
+class TestMetadataFirstFetch:
+    def test_fetch_requires_get_obs_metadata(self, tmp_path):
+        class _DummyCtx:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class CensusModule:
+            def open_soma(self, *, census_version):
+                return _DummyCtx()
+
+            # Deliberately no get_obs() to trigger metadata-first guard.
+            def get_anndata(self, *args, **kwargs):  # pragma: no cover
+                raise AssertionError("Should not call get_anndata without metadata prefilter")
+
+        with mock.patch.object(atlas, "_require_census", return_value=CensusModule()):
+            with pytest.raises(RuntimeError, match="Metadata-first atlas fetch requires"):
+                atlas.fetch_reference(
+                    "breast",
+                    cache_dir=tmp_path,
+                    force=True,
+                    coarse_cell_types=True,
+                )
 
 
 # ---------------------------------------------------------------------------

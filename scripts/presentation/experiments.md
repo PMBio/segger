@@ -18,7 +18,7 @@ The experiments answer three questions:
 |--------|------|
 | `run_param_benchmark_2gpu.sh` | **Parameter sweep** -- one-factor-at-a-time around a baseline |
 | `run_robustness_ablation_2gpu.sh` | **Robustness & ablation** -- stability repeats, interaction grid, stress tests |
-| `run_ablation_study.sh` | **Component ablation** -- loss decomposition, architecture, features (auto-detects GPUs) |
+| `run_ablation_study.sh` | **Component ablation** -- loss decomposition, graph topology, architecture, features (auto-detects GPUs) |
 | `build_default_10x_reference_artifacts.py` | Build 10x cell/nucleus **reference segmentations** for comparison |
 | `build_benchmark_validation_table.sh` | Compute **validation metrics** (MECR, contamination, TCO, doublet, assignment %) for every run |
 | `benchmark_status_dashboard.sh` | Live **terminal dashboard** showing progress, failures, and ranked metrics |
@@ -141,7 +141,7 @@ Systematically removes or swaps individual components -- loss terms, architectur
 | GPU handling | Hardcoded 2 GPUs (`GPU_A`, `GPU_B`) | Auto-detects N GPUs (round-robin distribution) |
 | Job spec | 10 pipe-delimited fields | 21 fields (adds loss weights, architecture, features, LR) |
 | Focus | Hyperparameter sensitivity & stability | Component necessity & design decisions |
-| Block toggles | `RUN_INTERACTION_GRID`, `RUN_STRESS_TESTS` | 6 toggles: `RUN_LOSS_ABLATION`, `RUN_SGLOSS_ABLATION`, `RUN_ALIGNMENT_SWEEP`, `RUN_ARCH_ABLATION`, `RUN_PREDICTION_ABLATION`, `RUN_LR_ABLATION` |
+| Block toggles | `RUN_INTERACTION_GRID`, `RUN_STRESS_TESTS` | 7 toggles: `RUN_LOSS_ABLATION`, `RUN_SGLOSS_ABLATION`, `RUN_ALIGNMENT_SWEEP`, `RUN_ARCH_ABLATION`, `RUN_GRAPH_ABLATION`, `RUN_PREDICTION_ABLATION`, `RUN_LR_ABLATION` (`0` by default) |
 
 ### Anchor configuration
 
@@ -201,7 +201,7 @@ Tests every meaningful subset of the 4 loss terms to determine which are necessa
 
 **Why:** The alignment loss weight was chosen somewhat arbitrarily. This sweep identifies the sweet spot. If 0.1 beats 0.03 on MECR without hurting assigned %, we should increase it.
 
-### Block D: Architecture Ablation (10 jobs)
+### Block D: Architecture Ablation (12 jobs)
 
 | Job | What changes | Question |
 |-----|-------------|----------|
@@ -211,6 +211,8 @@ Tests every meaningful subset of the 4 loss terms to determine which are necessa
 | `abl_width_32` | 32/32 hidden/out | Can a 4x smaller model match the default? |
 | `abl_width_128` | 128/128 hidden/out | Does 4x more capacity help? |
 | `abl_heads_1` | 1 attention head | Is multi-head attention necessary? |
+| `abl_heads_2` | 2 attention heads | Does a lighter multi-head setup already recover most gains? |
+| `abl_heads_6` | 6 attention heads | Is there value between the default and a very large head count? |
 | `abl_heads_8` | 8 attention heads | Diminishing returns from more heads? |
 | `abl_no_pos` | No positional embeddings | Are spatial encodings redundant given graph structure? |
 | `abl_no_norm` | No embedding normalization | Does L2 normalization help or constrain? |
@@ -218,7 +220,20 @@ Tests every meaningful subset of the 4 loss terms to determine which are necessa
 
 **Why:** Each tests whether a specific design choice is earning its complexity. Findings directly inform model simplification or capacity recommendations.
 
-### Block E: Prediction Mode (2 jobs)
+### Block E: Graph Topology (6 jobs)
+
+| Job | What changes | Question |
+|-----|-------------|----------|
+| `abl_txk_3` | `tx_max_k=3` | How sparse can the local transcript graph get before assignments break down? |
+| `abl_txk_10` | `tx_max_k=10` | Does a denser neighborhood improve context or just add noise/VRAM pressure? |
+| `abl_txdist_10` | `tx_max_dist=10` | Is a tighter local radius enough for clean segmentation? |
+| `abl_txdist_30` | `tx_max_dist=30` | Does broader context help long-range rescue or over-smooth local structure? |
+| `abl_graph_local` | `tx_max_k=3`, `tx_max_dist=10` | Best-case sparse/local graph stress test |
+| `abl_graph_dense` | `tx_max_k=10`, `tx_max_dist=30` | Best-case dense/global graph stress test |
+
+**Why:** These are core Segger decisions, not optimizer trivia. This block isolates whether the transcript graph itself is the limiting factor, and how much neighborhood density the GNN actually needs.
+
+### Block F: Prediction Mode (2 jobs)
 
 | Job | prediction_mode | Notes |
 |-----|----------------|-------|
@@ -227,7 +242,7 @@ Tests every meaningful subset of the 4 loss terms to determine which are necessa
 
 The anchor uses `nucleus` mode. These test whether alternative prediction graph construction strategies improve or degrade quality.
 
-### Block F: Learning Rate (3 jobs)
+### Block G: Learning Rate (3 jobs, legacy/off by default)
 
 | Job | learning_rate | Notes |
 |-----|--------------|-------|
@@ -239,7 +254,7 @@ The anchor uses `1e-3`. This identifies whether the learning rate is well-tuned 
 
 ### Total jobs
 
-**28 jobs** across 6 blocks. Each block can be toggled independently. Fits in one overnight session on 2+ GPUs.
+**33 jobs** across 7 blocks by default, or **36** if the legacy learning-rate sweep is enabled. Each block can be toggled independently. Fits in one overnight session on 2+ GPUs.
 
 ### GPU auto-detection
 

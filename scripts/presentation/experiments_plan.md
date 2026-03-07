@@ -252,7 +252,7 @@ Tests whether findings transfer beyond the Xenium pancreas dataset.
 
 ### Phase 1 (implemented in `run_ablation_study.sh`)
 
-These are now implemented as the 6 blocks of `scripts/run_ablation_study.sh`:
+These are now implemented as the 7 blocks of `scripts/run_ablation_study.sh`:
 
 1. **1A** Loss decomposition (6 runs) -- Block A: `abl_sg_only`, `abl_sg_tx`, `abl_sg_bd`, `abl_sg_tx_bd`, `abl_sg_align`, `abl_full`
 2. **1B** Triplet vs BCE (2 runs) -- Block B: `abl_sgloss_triplet`, `abl_sgloss_bce`
@@ -261,12 +261,13 @@ These are now implemented as the 6 blocks of `scripts/run_ablation_study.sh`:
 5. **3D** Embedding normalization on/off (1 run) -- Block D: `abl_no_norm`
 6. **4A** GNN depth (3 runs) -- Block D: `abl_depth_0`, `abl_depth_1`, `abl_depth_3`
 7. **4B** Model width (2 runs) -- Block D: `abl_width_32`, `abl_width_128`
-8. **4C** Attention heads (2 runs) -- Block D: `abl_heads_1`, `abl_heads_8`
+8. **4C** Attention heads (4 runs) -- Block D: `abl_heads_1`, `abl_heads_2`, `abl_heads_6`, `abl_heads_8`
 9. **3B** Boundary features / morphology (1 run) -- Block D: `abl_morph`
-10. **2C** Prediction graph mode (2 runs) -- Block E: `abl_pred_cell`, `abl_pred_uniform`
-11. **Learning rate** (3 runs) -- Block F: `abl_lr_3e4`, `abl_lr_3e3`, `abl_lr_1e2`
+10. **2A/2B** Transcript graph density and radius (6 runs) -- Block E: `abl_txk_*`, `abl_txdist_*`, `abl_graph_*`
+11. **2C** Prediction graph mode (2 runs) -- Block F: `abl_pred_cell`, `abl_pred_uniform`
+12. **Learning rate** (3 runs, legacy/off by default) -- Block G: `abl_lr_3e4`, `abl_lr_3e3`, `abl_lr_1e2`
 
-**Total: 28 runs**, fits in one overnight session on 2+ GPUs. The script auto-detects available GPUs (N-way round-robin) and each block can be toggled independently.
+**Total: 33 runs by default** (or **36** with the legacy LR block enabled), fits in one overnight session on 2+ GPUs. The script auto-detects available GPUs (N-way round-robin), pre-skips already-complete parameter sets, and each block can be toggled independently.
 
 **Not yet implemented from this tier:**
 - **2A** Edge type removal (requires data module changes to selectively drop edge types)
