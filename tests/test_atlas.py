@@ -80,6 +80,9 @@ class TestNormalizeTissue:
         assert atlas._normalize_tissue("colon") == "large intestine"
         assert atlas._normalize_tissue("Colon") == "large intestine"
         assert atlas._normalize_tissue("  CRC  ") == "large intestine"
+        assert atlas._normalize_tissue("large intestine") == "large intestine"
+        assert atlas._normalize_tissue("large_intestine") == "large intestine"
+        assert atlas._normalize_tissue("large-intestine") == "large intestine"
 
     def test_unknown_tissue_raises(self):
         with pytest.raises(ValueError, match="Unknown tissue type"):

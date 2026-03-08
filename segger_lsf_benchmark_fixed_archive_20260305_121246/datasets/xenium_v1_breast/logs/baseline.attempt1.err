@@ -1,0 +1,100 @@
+<frozen importlib._bootstrap_external>:1241: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+<frozen importlib._bootstrap_external>:1241: FutureWarning: The cuda.cuda module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.driver module instead.
+Traceback (most recent call last):
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/bin/segger", line 6, in <module>
+    sys.exit(app())
+             ^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/cyclopts/core.py", line 1869, in __call__
+    result = _run_maybe_async_command(command, bound, resolved_backend)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/cyclopts/_run.py", line 50, in _run_maybe_async_command
+    return command(*bound.args, **bound.kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/cli/main.py", line 525, in segment
+    datamodule = ISTDataModule(
+                 ^^^^^^^^^^^^^^
+  File "<string>", line 34, in __init__
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/data/data_module.py", line 209, in __post_init__
+    self.load()
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/data/data_module.py", line 285, in load
+    bd = pp.boundaries
+         ^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/functools.py", line 1001, in __get__
+    val = self.func(instance)
+          ^^^^^^^^^^^^^^^^^^^
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/io/preprocessor.py", line 542, in boundaries
+    bd.index = bd[std.id] + '_' + bd[std.boundary_type].map({
+               ~~~~~~~~~~~^~~~~
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/pandas/core/ops/common.py", line 76, in new_method
+    return method(self, other)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/pandas/core/arraylike.py", line 186, in __add__
+    return self._arith_method(other, operator.add)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/pandas/core/series.py", line 6135, in _arith_method
+    return base.IndexOpsMixin._arith_method(self, other, op)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/pandas/core/base.py", line 1382, in _arith_method
+    result = ops.arithmetic_op(lvalues, rvalues, op)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/pandas/core/ops/array_ops.py", line 283, in arithmetic_op
+    res_values = _na_arithmetic_op(left, right, op)  # type: ignore[arg-type]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/pandas/core/ops/array_ops.py", line 218, in _na_arithmetic_op
+    result = func(left, right)
+             ^^^^^^^^^^^^^^^^^
+numpy._core._exceptions._UFuncNoLoopError: ufunc 'add' did not contain a loop with signature matching types (dtype('int32'), dtype('<U1')) -> None
+<frozen importlib._bootstrap_external>:1241: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+<frozen importlib._bootstrap_external>:1241: FutureWarning: The cuda.cuda module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.driver module instead.
+Traceback (most recent call last):
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/bin/segger", line 6, in <module>
+    sys.exit(app())
+             ^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/cyclopts/core.py", line 1869, in __call__
+    result = _run_maybe_async_command(command, bound, resolved_backend)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/cyclopts/_run.py", line 50, in _run_maybe_async_command
+    return command(*bound.args, **bound.kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/cli/main.py", line 525, in segment
+    datamodule = ISTDataModule(
+                 ^^^^^^^^^^^^^^
+  File "<string>", line 34, in __init__
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/data/data_module.py", line 209, in __post_init__
+    self.load()
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/data/data_module.py", line 323, in load
+    self.ad = setup_anndata(
+              ^^^^^^^^^^^^^^
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/data/utils/anndata.py", line 171, in setup_anndata
+    .set_index(bd_fields.index, verify_integrity=True)
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/pandas/core/frame.py", line 6182, in set_index
+    raise ValueError(f"Index has duplicate keys: {duplicates}")
+ValueError: Index has duplicate keys: Index([nan], dtype='object', name='entity_index')
+<frozen importlib._bootstrap_external>:1241: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+<frozen importlib._bootstrap_external>:1241: FutureWarning: The cuda.cuda module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.driver module instead.
+Traceback (most recent call last):
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/bin/segger", line 6, in <module>
+    sys.exit(app())
+             ^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/cyclopts/core.py", line 1869, in __call__
+    result = _run_maybe_async_command(command, bound, resolved_backend)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/cyclopts/_run.py", line 50, in _run_maybe_async_command
+    return command(*bound.args, **bound.kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/cli/main.py", line 525, in segment
+    datamodule = ISTDataModule(
+                 ^^^^^^^^^^^^^^
+  File "<string>", line 34, in __init__
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/data/data_module.py", line 209, in __post_init__
+    self.load()
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/data/data_module.py", line 323, in load
+    self.ad = setup_anndata(
+              ^^^^^^^^^^^^^^
+  File "/dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0/src/segger/data/utils/anndata.py", line 171, in setup_anndata
+    .set_index(bd_fields.index, verify_integrity=True)
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2/lib/python3.11/site-packages/pandas/core/frame.py", line 6182, in set_index
+    raise ValueError(f"Index has duplicate keys: {duplicates}")
+ValueError: Index has duplicate keys: Index([nan], dtype='object', name='entity_index')

@@ -253,14 +253,6 @@ class AnnDataWriter:
         output_path = output_dir / output_name
         output_paths = split_h5ad_output_paths(output_path)
 
-        if not overwrite:
-            for path in output_paths.values():
-                if path.exists():
-                    raise FileExistsError(
-                        f"Output path exists: {path}. "
-                        "Use overwrite=True to replace."
-                    )
-
         merged = merge_predictions_with_transcripts(
             predictions=predictions,
             transcripts=transcripts,
@@ -274,6 +266,28 @@ class AnnDataWriter:
             cell_id_column=cell_id_column,
             unassigned_value=self.unassigned_marker,
         )
+        has_fragments = split_frames[OBJECT_TYPE_FRAGMENT].height > 0
+        paths_to_write = [
+            output_paths["combined"],
+            output_paths[OBJECT_TYPE_CELL],
+        ]
+        if has_fragments:
+            paths_to_write.append(output_paths[OBJECT_TYPE_FRAGMENT])
+
+        if not overwrite:
+            for path in paths_to_write:
+                if path.exists():
+                    raise FileExistsError(
+                        f"Output path exists: {path}. "
+                        "Use overwrite=True to replace."
+                    )
+            if (not has_fragments) and output_paths[OBJECT_TYPE_FRAGMENT].exists():
+                raise FileExistsError(
+                    f"Output path exists: {output_paths[OBJECT_TYPE_FRAGMENT]}. "
+                    "Remove stale fragment output or use overwrite=True."
+                )
+        elif (not has_fragments) and output_paths[OBJECT_TYPE_FRAGMENT].exists():
+            output_paths[OBJECT_TYPE_FRAGMENT].unlink()
 
         adata = build_anndata_table(
             transcripts=split_frames["all"],
@@ -295,16 +309,6 @@ class AnnDataWriter:
             z_column=z_column,
             unassigned_value=self.unassigned_marker,
         )
-        fragments_adata = build_anndata_table(
-            transcripts=split_frames[OBJECT_TYPE_FRAGMENT],
-            var_transcripts=merged,
-            cell_id_column=cell_id_column,
-            feature_column=feature_column,
-            x_column=x_column,
-            y_column=y_column,
-            z_column=z_column,
-            unassigned_value=self.unassigned_marker,
-        )
 
         write_kwargs = {}
         if self.compression is not None:
@@ -314,5 +318,16 @@ class AnnDataWriter:
 
         adata.write_h5ad(output_paths["combined"], **write_kwargs)
         cells_adata.write_h5ad(output_paths[OBJECT_TYPE_CELL], **write_kwargs)
-        fragments_adata.write_h5ad(output_paths[OBJECT_TYPE_FRAGMENT], **write_kwargs)
+        if has_fragments:
+            fragments_adata = build_anndata_table(
+                transcripts=split_frames[OBJECT_TYPE_FRAGMENT],
+                var_transcripts=merged,
+                cell_id_column=cell_id_column,
+                feature_column=feature_column,
+                x_column=x_column,
+                y_column=y_column,
+                z_column=z_column,
+                unassigned_value=self.unassigned_marker,
+            )
+            fragments_adata.write_h5ad(output_paths[OBJECT_TYPE_FRAGMENT], **write_kwargs)
         return output_path

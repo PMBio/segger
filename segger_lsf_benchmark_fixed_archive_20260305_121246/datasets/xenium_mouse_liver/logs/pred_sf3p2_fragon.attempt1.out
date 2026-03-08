@@ -1,0 +1,98 @@
+Sender: LSF System <lsfadmin@fse-superl40s-01>
+Subject: Job 47480287: <segger_xenium_mouse_liver_pred_sf3p2_fragon> in cluster <DKFZ> Exited
+
+Job <segger_xenium_mouse_liver_pred_sf3p2_fragon> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 13:01:20 2026
+Job was executed on host(s) <8*fse-superl40s-01>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 15:28:01 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 15:28:01 2026
+Terminated at Wed Mar  4 16:57:15 2026
+Results reported at Wed Mar  4 16:57:15 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_mouse_liver_pred_sf3p2_fragon
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/pred_sf3p2_fragon.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/pred_sf3p2_fragon.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 6:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=192G]"
+#BSUB -M 192G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=38G"
+#BSUB -w "done(segger_xenium_mouse_liver_baseline)"
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/pred_sf3p2_fragon/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' predict ;;
+    138|143) printf '%s_runlimit' predict ;;
+    *) printf '%s_error' predict ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/pred_sf3p2_fragon/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/pred_sf3p2_fragon/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != predict_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   5482.00 sec.
+    Max Memory :                                 80971 MB
+    Average Memory :                             46437.80 MB
+    Total Requested Memory :                     196608.00 MB
+    Delta Memory :                               115637.00 MB
+    Max Swap :                                   -
+    Max Processes :                              5
+    Max Threads :                                718
+    Run time :                                   5351 sec.
+    Turnaround time :                            14155 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_mouse_liver job=pred_sf3p2_fragon attempt=1
+[JOB] queue=gpu-pro gmem=38G mem=192G wall=6:00
+fse-superl40s-01
+Wed Mar  4 15:28:04 UTC 2026
+NVIDIA L40S, 46068, 0
+Predicting ━━━━━━━━                       2642/9673 1:24:28 • 3:32:45 0.55it/s 
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/pred_sf3p2_fragon.attempt1.err> for stderr output of this job.
+

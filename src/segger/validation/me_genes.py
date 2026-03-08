@@ -86,10 +86,37 @@ def find_markers(
 
     resolved_cell_type_column = _resolve_cell_type_column(adata, cell_type_column)
     markers = {}
-    sc.tl.rank_genes_groups(adata, groupby=resolved_cell_type_column)
+    group_counts = (
+        adata.obs[resolved_cell_type_column]
+        .value_counts(dropna=True)
+    )
+    rankable_groups = group_counts[group_counts >= 2].index
+    if len(rankable_groups) >= 2:
+        rankable_adata = adata[
+            adata.obs[resolved_cell_type_column].isin(rankable_groups)
+        ].copy()
+        try:
+            sc.tl.rank_genes_groups(rankable_adata, groupby=resolved_cell_type_column)
+        except ValueError as exc:
+            warnings.warn(
+                f"rank_genes_groups skipped due to invalid group statistics: {exc}",
+                RuntimeWarning,
+            )
+    elif len(group_counts) > 0:
+        skipped_groups = sorted(
+            str(group)
+            for group in group_counts[group_counts < 2].index
+        )
+        warnings.warn(
+            "rank_genes_groups skipped because fewer than two cell-type groups "
+            f"have >=2 cells. Singleton groups: {', '.join(skipped_groups)}",
+            RuntimeWarning,
+        )
+
     genes = adata.var_names
 
-    for cell_type in adata.obs[resolved_cell_type_column].unique():
+    cell_types = adata.obs[resolved_cell_type_column].dropna().unique()
+    for cell_type in cell_types:
         subset = adata[adata.obs[resolved_cell_type_column] == cell_type]
         mean_expression = np.asarray(subset.X.mean(axis=0)).flatten()
 

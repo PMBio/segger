@@ -260,11 +260,12 @@ class SpatialDataWriter:
         )
         cell_tx = split_frames[OBJECT_TYPE_CELL]
         fragment_tx = split_frames[OBJECT_TYPE_FRAGMENT]
+        has_fragments = fragment_tx.height > 0
 
         # Convert transcripts to pandas for SpatialData
         tx_pd = transcripts.to_pandas()
         cell_tx_pd = cell_tx.to_pandas()
-        fragment_tx_pd = fragment_tx.to_pandas()
+        fragment_tx_pd = fragment_tx.to_pandas() if has_fragments else None
 
         # SOPA expects "cell_id" assignment in points.
         if cell_id_column in tx_pd.columns and "cell_id" not in tx_pd.columns:
@@ -304,10 +305,9 @@ class SpatialDataWriter:
 
         # Shapes element (if boundaries provided or generated)
         if self.include_boundaries and self.boundary_method != "skip":
-            shape_specs = (
-                (self.shapes_key, cell_tx_pd),
-                (self.fragment_shapes_key, fragment_tx_pd),
-            )
+            shape_specs = [(self.shapes_key, cell_tx_pd)]
+            if has_fragments and fragment_tx_pd is not None:
+                shape_specs.append((self.fragment_shapes_key, fragment_tx_pd))
             for shape_key, shape_tx_pd in shape_specs:
                 shapes = self._get_boundaries(
                     transcripts=shape_tx_pd,
@@ -338,21 +338,22 @@ class SpatialDataWriter:
                 y_column=y_column,
                 z_column=z_column,
             )
-            tables_elements[self.fragment_table_key] = self._build_table_element(
-                TableModel=TableModel,
-                transcripts=fragment_tx,
-                var_transcripts=transcripts,
-                region=(
-                    self.fragment_shapes_key
-                    if self.fragment_shapes_key in shapes_elements
-                    else None
-                ),
-                cell_id_column=cell_id_column,
-                feature_column=feature_column,
-                x_column=x_column,
-                y_column=y_column,
-                z_column=z_column,
-            )
+            if has_fragments:
+                tables_elements[self.fragment_table_key] = self._build_table_element(
+                    TableModel=TableModel,
+                    transcripts=fragment_tx,
+                    var_transcripts=transcripts,
+                    region=(
+                        self.fragment_shapes_key
+                        if self.fragment_shapes_key in shapes_elements
+                        else None
+                    ),
+                    cell_id_column=cell_id_column,
+                    feature_column=feature_column,
+                    x_column=x_column,
+                    y_column=y_column,
+                    z_column=z_column,
+                )
 
         # Create SpatialData (prefer modern constructor methods, keep fallback)
         sdata = self._build_spatialdata(

@@ -1,0 +1,201 @@
+Sender: LSF System <lsfadmin@lsf22-gpu02.dkfz-heidelberg.de>
+Subject: Job 47480264: <segger_xenium_crc_pred_sf1p2_fragon> in cluster <DKFZ> Exited
+
+Job <segger_xenium_crc_pred_sf1p2_fragon> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 14:01:11 2026
+Job was executed on host(s) <8*lsf22-gpu02>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 14:28:34 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 14:28:34 2026
+Terminated at Wed Mar  4 14:39:33 2026
+Results reported at Wed Mar  4 14:39:33 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_crc_pred_sf1p2_fragon
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/logs/pred_sf1p2_fragon.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/logs/pred_sf1p2_fragon.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 6:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=192G]"
+#BSUB -M 192G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=38G"
+#BSUB -w "done(segger_xenium_crc_baseline)"
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/runs/pred_sf1p2_fragon/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' predict ;;
+    138|143) printf '%s_runlimit' predict ;;
+    *) printf '%s_error' predict ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/runs/pred_sf1p2_fragon/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/runs/pred_sf1p2_fragon/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != predict_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   834.00 sec.
+    Max Memory :                                 19202 MB
+    Average Memory :                             5425.21 MB
+    Total Requested Memory :                     196608.00 MB
+    Delta Memory :                               177406.00 MB
+    Max Swap :                                   -
+    Max Processes :                              5
+    Max Threads :                                590
+    Run time :                                   656 sec.
+    Turnaround time :                            2302 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_crc job=pred_sf1p2_fragon attempt=1
+[JOB] queue=gpu-pro gmem=38G mem=192G wall=6:00
+lsf22-gpu02
+Wed Mar  4 14:28:38 CET 2026
+NVIDIA A100-PCIE-40GB, 40960, 0
+Predicting ━━━━━━━                         372/1596 0:01:38 • 0:03:56 5.20it/s 
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/logs/pred_sf1p2_fragon.attempt1.err> for stderr output of this job.
+
+Sender: LSF System <lsfadmin@nct-superh200-01>
+Subject: Job 47474076: <segger_xenium_crc_pred_sf1p2_fragon> in cluster <DKFZ> Done
+
+Job <segger_xenium_crc_pred_sf1p2_fragon> was submitted from host <odcf-worker01.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 07:58:49 2026
+Job was executed on host(s) <8*nct-superh200-01>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Thu Mar  5 08:11:52 2026
+</home/e915i> was used as the home directory.
+</omics/groups/OE0606/internal/elihei/projects/segger-0.2.0> was used as the working directory.
+Started at Thu Mar  5 08:11:52 2026
+Terminated at Thu Mar  5 08:22:19 2026
+Results reported at Thu Mar  5 08:22:19 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_crc_pred_sf1p2_fragon
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/logs/pred_sf1p2_fragon.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/logs/pred_sf1p2_fragon.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 2:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=128G]"
+#BSUB -M 128G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=60G"
+#BSUB -w "done(segger_xenium_crc_baseline)"
+
+set -euo pipefail
+
+cd /omics/groups/OE0606/internal/elihei/projects/segger-0.2.0
+set +u
+export MAMBA_NO_ENV_PROMPT=1
+export CONDA_PROMPT_MODIFIER=""
+export PYTHONNOUSERSITE=1
+export MAMBA_EXE=/home/e915i/.local/bin/micromamba
+export MAMBA_ROOT_PREFIX=/dkfz/cluster/gpu/data/OE0606/elihei/micromamba
+__mamba_setup="$("$MAMBA_EXE" shell hook --shell bash --root-prefix "$MAMBA_ROOT_PREFIX" 2> /dev/null)"
+if [ $? -eq 0 ]; then
+    eval "$__mamba_setup"
+else
+    alias micromamba="$MAMBA_EXE"
+fi
+unset __mamba_setup
+micromamba activate /omics/groups/OE0606/internal/elihei/projects/conda_envs/seggerv2
+set -u
+
+echo "[JOB] dataset=xenium_crc job=pred_sf1p2_fragon attempt=1"
+echo "[JOB] queue=gpu-pro gmem=60G mem=128G wall=2:00"
+hostname || true
+date || true
+nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits || true
+
+mkdir -p /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/runs/pred_sf1p2_fragon
+segger predict -c /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/runs/baseline/checkpoints/last.ckpt -i /dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_CRC_fixed -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/runs/pred_sf1p2_fragon --prediction-scale-factor 1.2 --use-3d checkpoint --fragment-mode
+segger_rc=$?
+echo "[JOB] segger_rc=${segger_rc}"
+if [[ "${segger_rc}" -ne 0 ]]; then
+  exit "${segger_rc}"
+fi
+
+if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/runs/pred_sf1p2_fragon/segger_segmentation.parquet ]]; then
+  ln -sfn segger_segmentation.parquet /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/runs/pred_sf1p2_fragon/transcripts.parquet
+fi
+
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   2297.00 sec.
+    Max Memory :                                 29858 MB
+    Average Memory :                             13310.63 MB
+    Total Requested Memory :                     131072.00 MB
+    Delta Memory :                               101214.00 MB
+    Max Swap :                                   -
+    Max Processes :                              12
+    Max Threads :                                904
+    Run time :                                   623 sec.
+    Turnaround time :                            87810 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_crc job=pred_sf1p2_fragon attempt=1
+[JOB] queue=gpu-pro gmem=60G mem=128G wall=2:00
+nct-superh200-01
+Thu Mar  5 08:11:57 UTC 2026
+NVIDIA H200, 143771, 0
+Predicting ━━━━━━━                        389/1596 0:01:13 • 0:01:52 10.78it/s 
+[JOB] segger_rc=0
+Written AnnData output: /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/exports/pred_sf1p2_fragon/anndata/segger_segmentation.h5ad
+Exporting Xenium Explorer output to: /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/exports/pred_sf1p2_fragon/xenium_explorer
+[JOB] export_rc=1
+[JOB] completed
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_crc/logs/pred_sf1p2_fragon.attempt1.err> for stderr output of this job.
+

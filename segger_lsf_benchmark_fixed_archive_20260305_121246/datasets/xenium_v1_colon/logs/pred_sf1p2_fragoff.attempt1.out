@@ -1,0 +1,200 @@
+Sender: LSF System <lsfadmin@fse-superl40s-01>
+Subject: Job 47480317: <segger_xenium_v1_colon_pred_sf1p2_fragoff> in cluster <DKFZ> Done
+
+Job <segger_xenium_v1_colon_pred_sf1p2_fragoff> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 13:01:25 2026
+Job was executed on host(s) <8*fse-superl40s-01>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 14:10:44 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 14:10:44 2026
+Terminated at Wed Mar  4 14:32:49 2026
+Results reported at Wed Mar  4 14:32:49 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_v1_colon_pred_sf1p2_fragoff
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/logs/pred_sf1p2_fragoff.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/logs/pred_sf1p2_fragoff.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 6:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=96G]"
+#BSUB -M 96G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=30G"
+#BSUB -w "done(segger_xenium_v1_colon_baseline)"
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/runs/pred_sf1p2_fragoff/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' predict ;;
+    138|143) printf '%s_runlimit' predict ;;
+    *) printf '%s_error' predict ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/runs/pred_sf1p2_fragoff/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/runs/pred_sf1p2_fragoff/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != predict_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   1441.00 sec.
+    Max Memory :                                 36645 MB
+    Average Memory :                             23754.12 MB
+    Total Requested Memory :                     98304.00 MB
+    Delta Memory :                               61659.00 MB
+    Max Swap :                                   -
+    Max Processes :                              4
+    Max Threads :                                590
+    Run time :                                   1321 sec.
+    Turnaround time :                            5484 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_v1_colon job=pred_sf1p2_fragoff attempt=1
+[JOB] queue=gpu-pro gmem=30G mem=96G wall=6:00
+fse-superl40s-01
+Wed Mar  4 14:10:49 UTC 2026
+NVIDIA L40S, 46068, 0
+Predicting ━━━━━━━╸                        687/2686 0:16:19 • 0:44:13 0.75it/s 
+[JOB] segger_rc=0
+[JOB] completed
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/logs/pred_sf1p2_fragoff.attempt1.err> for stderr output of this job.
+
+Sender: LSF System <lsfadmin@aih-superl40s-07>
+Subject: Job 47479556: <segger_xenium_v1_colon_pred_sf1p2_fragoff> in cluster <DKFZ> Done
+
+Job <segger_xenium_v1_colon_pred_sf1p2_fragoff> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 12:21:44 2026
+Job was executed on host(s) <8*aih-superl40s-07>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 13:27:15 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 13:27:15 2026
+Terminated at Wed Mar  4 14:33:40 2026
+Results reported at Wed Mar  4 14:33:40 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_v1_colon_pred_sf1p2_fragoff
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/logs/pred_sf1p2_fragoff.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/logs/pred_sf1p2_fragoff.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 6:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=96G]"
+#BSUB -M 96G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=30G"
+#BSUB -w "done(segger_xenium_v1_colon_baseline)"
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/runs/pred_sf1p2_fragoff/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' predict ;;
+    138|143) printf '%s_runlimit' predict ;;
+    *) printf '%s_error' predict ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/runs/pred_sf1p2_fragoff/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/runs/pred_sf1p2_fragoff/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != predict_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   1580.00 sec.
+    Max Memory :                                 48112 MB
+    Average Memory :                             25188.23 MB
+    Total Requested Memory :                     98304.00 MB
+    Delta Memory :                               50192.00 MB
+    Max Swap :                                   -
+    Max Processes :                              5
+    Max Threads :                                590
+    Run time :                                   3980 sec.
+    Turnaround time :                            7916 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_v1_colon job=pred_sf1p2_fragoff attempt=1
+[JOB] queue=gpu-pro gmem=30G mem=96G wall=6:00
+aih-superl40s-07
+Wed Mar  4 13:27:21 UTC 2026
+NVIDIA L40S, 46068, 0
+Predicting ━━━━━━━━━                       784/2682 0:59:01 • 2:15:58 0.23it/s 
+[JOB] segger_rc=0
+[JOB] completed
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_v1_colon/logs/pred_sf1p2_fragoff.attempt1.err> for stderr output of this job.
+

@@ -290,13 +290,16 @@ def _normalize_tissue(tissue: str) -> str:
     Raises ``ValueError`` with fuzzy-match suggestions if the name is not
     recognized.
     """
-    key = tissue.strip().lower()
+    key = " ".join(str(tissue).strip().lower().replace("_", " ").replace("-", " ").split())
     if key in _TISSUE_ALIASES:
         return _TISSUE_ALIASES[key]
+    canonical = set(_TISSUE_ALIASES.values())
+    if key in canonical:
+        return key
 
     # Not a known alias — try fuzzy matching
     close = difflib.get_close_matches(key, _ALL_KNOWN_NAMES, n=5, cutoff=0.6)
-    valid_tissues = sorted(set(_TISSUE_ALIASES.values()))
+    valid_tissues = sorted(canonical)
 
     msg = f"Unknown tissue type: '{tissue}'."
     if close:
@@ -309,7 +312,10 @@ def _normalize_tissue(tissue: str) -> str:
 
 def _normalize_tissue_lenient(tissue: str) -> str:
     """Like ``_normalize_tissue`` but passes through unknown names instead of raising."""
-    key = tissue.strip().lower()
+    key = " ".join(str(tissue).strip().lower().replace("_", " ").replace("-", " ").split())
+    canonical = set(_TISSUE_ALIASES.values())
+    if key in canonical:
+        return key
     return _TISSUE_ALIASES.get(key, key)
 
 

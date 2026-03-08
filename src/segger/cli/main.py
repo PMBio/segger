@@ -1958,6 +1958,10 @@ def fetch(
              "in current working directory (or $SEGGER_REFERENCE_CACHE_DIR).",
         group=group_atlas,
     )] = None,
+    force: Annotated[bool, Parameter(
+        help="Force re-download even if a cached reference already exists.",
+        group=group_atlas,
+    )] = False,
 ):
     """Fetch a tissue-specific scRNA-seq reference from CellxGENE Census."""
     from ..data.atlas import fetch_reference
@@ -1974,6 +1978,7 @@ def fetch(
         drop_unknown_cell_types=True,
         drop_other_cell_types=True,
         progress=True,
+        force=force,
     )
     print(f"Tissue:       {ref.tissue}")
     print(f"Organism:     {ref.organism}")

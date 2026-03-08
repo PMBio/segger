@@ -1,0 +1,323 @@
+Sender: LSF System <lsfadmin@lsf22-gpu05>
+Subject: Job 47480278: <segger_xenium_mouse_liver_use3d_true> in cluster <DKFZ> Exited
+
+Job <segger_xenium_mouse_liver_use3d_true> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 14:01:18 2026
+Job was executed on host(s) <8*lsf22-gpu05>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 14:01:18 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 14:01:18 2026
+Terminated at Wed Mar  4 14:06:32 2026
+Results reported at Wed Mar  4 14:06:32 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_mouse_liver_use3d_true
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/use3d_true.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/use3d_true.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 8:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=128G]"
+#BSUB -M 128G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=30G"
+
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/use3d_true/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' segment ;;
+    138|143) printf '%s_runlimit' segment ;;
+    *) printf '%s_error' segment ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/use3d_true/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/use3d_true/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != segment_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   2155.00 sec.
+    Max Memory :                                 88613 MB
+    Average Memory :                             42426.44 MB
+    Total Requested Memory :                     131072.00 MB
+    Delta Memory :                               42459.00 MB
+    Max Swap :                                   -
+    Max Processes :                              4
+    Max Threads :                                680
+    Run time :                                   311 sec.
+    Turnaround time :                            314 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_mouse_liver job=use3d_true attempt=1
+[JOB] queue=gpu-pro gmem=30G mem=128G wall=8:00
+lsf22-gpu05
+Wed Mar  4 14:01:22 CET 2026
+NVIDIA A100-PCIE-40GB, 40960, 0
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/use3d_true.attempt1.err> for stderr output of this job.
+
+Sender: LSF System <lsfadmin@lsf22-gpu01>
+Subject: Job 47479536: <segger_xenium_mouse_liver_use3d_true> in cluster <DKFZ> Done
+
+Job <segger_xenium_mouse_liver_use3d_true> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 13:21:37 2026
+Job was executed on host(s) <8*lsf22-gpu01>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 13:25:16 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 13:25:16 2026
+Terminated at Wed Mar  4 16:07:42 2026
+Results reported at Wed Mar  4 16:07:42 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_mouse_liver_use3d_true
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/use3d_true.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/use3d_true.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 8:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=128G]"
+#BSUB -M 128G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=30G"
+
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/use3d_true/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' segment ;;
+    138|143) printf '%s_runlimit' segment ;;
+    *) printf '%s_error' segment ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/use3d_true/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/use3d_true/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != segment_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   17108.00 sec.
+    Max Memory :                                 113176 MB
+    Average Memory :                             43234.33 MB
+    Total Requested Memory :                     131072.00 MB
+    Delta Memory :                               17896.00 MB
+    Max Swap :                                   -
+    Max Processes :                              28
+    Max Threads :                                716
+    Run time :                                   9743 sec.
+    Turnaround time :                            9965 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_mouse_liver job=use3d_true attempt=1
+[JOB] queue=gpu-pro gmem=30G mem=128G wall=8:00
+lsf22-gpu01
+Wed Mar  4 13:25:20 CET 2026
+NVIDIA A100-PCIE-40GB, 40960, 0
+┏━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name    ┃ Type              ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model   │ ISTEncoder        │ 91.5 K │ train │     0 │
+│ 1 │ loss_tx │ TripletLoss       │      0 │ train │     0 │
+│ 2 │ loss_sg │ TripletMarginLoss │      0 │ train │     0 │
+└───┴─────────┴───────────────────┴────────┴───────┴───────┘
+Trainable params: 91.5 K                                                        
+Non-trainable params: 0                                                         
+Total params: 91.5 K                                                            
+Total estimated model params size (MB): 0                                       
+Modules in train mode: 76                                                       
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+Epoch 19/19 ━━━━━━━━━━━━━━━━ 772/772 0:03:38 •        3.75it/s v_num: 0.000     
+                                     0:00:00                   train:loss: 0.066
+                                                               train:loss_tx:   
+                                                               0.006            
+                                                               train:loss_bd:   
+                                                               0.093            
+                                                               train:loss_sg:   
+                                                               0.132 val:loss:  
+                                                               0.073            
+                                                               val:loss_tx:     
+                                                               0.004            
+                                                               val:loss_bd:     
+                                                               0.104            
+                                                               val:loss_sg:     
+                                                               0.151            
+Predicting ━━━━━━━━━                      2988/9580 1:04:19 • 2:12:59 0.83it/s 
+[JOB] segger_rc=0
+[JOB] completed
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/use3d_true.attempt1.err> for stderr output of this job.
+
+Sender: LSF System <lsfadmin@aih-superl40s-03>
+Subject: Job 47481779: <segger_xenium_mouse_liver_use3d_true> in cluster <DKFZ> Exited
+
+Job <segger_xenium_mouse_liver_use3d_true> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 14:25:29 2026
+Job was executed on host(s) <8*aih-superl40s-03>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 14:56:53 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 14:56:53 2026
+Terminated at Wed Mar  4 15:08:18 2026
+Results reported at Wed Mar  4 15:08:18 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_mouse_liver_use3d_true
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/use3d_true.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/use3d_true.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 8:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=128G]"
+#BSUB -M 128G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=30G"
+
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/use3d_true/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' segment ;;
+    138|143) printf '%s_runlimit' segment ;;
+    *) printf '%s_error' segment ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/use3d_true/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/runs/use3d_true/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != segment_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   2459.00 sec.
+    Max Memory :                                 97074 MB
+    Average Memory :                             53626.87 MB
+    Total Requested Memory :                     131072.00 MB
+    Delta Memory :                               33998.00 MB
+    Max Swap :                                   -
+    Max Processes :                              5
+    Max Threads :                                718
+    Run time :                                   682 sec.
+    Turnaround time :                            2569 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_mouse_liver job=use3d_true attempt=1
+[JOB] queue=gpu-pro gmem=30G mem=128G wall=8:00
+aih-superl40s-03
+Wed Mar  4 14:56:56 UTC 2026
+NVIDIA L40S, 46068, 0
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_mouse_liver/logs/use3d_true.attempt1.err> for stderr output of this job.
+

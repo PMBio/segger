@@ -1,0 +1,370 @@
+Sender: LSF System <lsfadmin@aih-superl40s-05>
+Subject: Job 47479528: <segger_xenium_nsclc_use3d_true> in cluster <DKFZ> Done
+
+Job <segger_xenium_nsclc_use3d_true> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 12:21:32 2026
+Job was executed on host(s) <8*aih-superl40s-05>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 12:23:56 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 12:23:56 2026
+Terminated at Wed Mar  4 14:55:00 2026
+Results reported at Wed Mar  4 14:55:00 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_nsclc_use3d_true
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/logs/use3d_true.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/logs/use3d_true.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 8:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=128G]"
+#BSUB -M 128G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=30G"
+
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/runs/use3d_true/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' segment ;;
+    138|143) printf '%s_runlimit' segment ;;
+    *) printf '%s_error' segment ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/runs/use3d_true/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/runs/use3d_true/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != segment_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   15499.00 sec.
+    Max Memory :                                 123758 MB
+    Average Memory :                             78834.54 MB
+    Total Requested Memory :                     131072.00 MB
+    Delta Memory :                               7314.00 MB
+    Max Swap :                                   -
+    Max Processes :                              27
+    Max Threads :                                718
+    Run time :                                   9061 sec.
+    Turnaround time :                            9208 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_nsclc job=use3d_true attempt=1
+[JOB] queue=gpu-pro gmem=30G mem=128G wall=8:00
+aih-superl40s-05
+Wed Mar  4 12:24:00 UTC 2026
+NVIDIA L40S, 46068, 0
+┏━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name    ┃ Type              ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model   │ ISTEncoder        │ 82.9 K │ train │     0 │
+│ 1 │ loss_tx │ TripletLoss       │      0 │ train │     0 │
+│ 2 │ loss_sg │ TripletMarginLoss │      0 │ train │     0 │
+└───┴─────────┴───────────────────┴────────┴───────┴───────┘
+Trainable params: 82.9 K                                                        
+Non-trainable params: 0                                                         
+Total params: 82.9 K                                                            
+Total estimated model params size (MB): 0                                       
+Modules in train mode: 76                                                       
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+Epoch 19/19 ━━━━━━━━━━━━━━━━ 591/591 0:03:21 •        3.20it/s v_num: 0.000     
+                                     0:00:00                   train:loss: 0.037
+                                                               train:loss_tx:   
+                                                               0.000            
+                                                               train:loss_bd:   
+                                                               0.073            
+                                                               train:loss_sg:   
+                                                               0.039 val:loss:  
+                                                               0.055            
+                                                               val:loss_tx:     
+                                                               0.013            
+                                                               val:loss_bd:     
+                                                               0.107            
+                                                               val:loss_sg:     
+                                                               0.038            
+Predicting ━━━━━━                         1452/7164 0:50:16 • 3:05:52 0.51it/s 
+[JOB] segger_rc=0
+[JOB] completed
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/logs/use3d_true.attempt1.err> for stderr output of this job.
+
+Sender: LSF System <lsfadmin@aih-superl40s-03>
+Subject: Job 47481771: <segger_xenium_nsclc_use3d_true> in cluster <DKFZ> Exited
+
+Job <segger_xenium_nsclc_use3d_true> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 14:25:26 2026
+Job was executed on host(s) <8*aih-superl40s-03>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 14:56:51 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 14:56:51 2026
+Terminated at Wed Mar  4 15:06:58 2026
+Results reported at Wed Mar  4 15:06:58 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_nsclc_use3d_true
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/logs/use3d_true.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/logs/use3d_true.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 8:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=128G]"
+#BSUB -M 128G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=30G"
+
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/runs/use3d_true/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' segment ;;
+    138|143) printf '%s_runlimit' segment ;;
+    *) printf '%s_error' segment ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/runs/use3d_true/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/runs/use3d_true/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != segment_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   2688.00 sec.
+    Max Memory :                                 124699 MB
+    Average Memory :                             50329.75 MB
+    Total Requested Memory :                     131072.00 MB
+    Delta Memory :                               6373.00 MB
+    Max Swap :                                   -
+    Max Processes :                              5
+    Max Threads :                                718
+    Run time :                                   604 sec.
+    Turnaround time :                            2492 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_nsclc job=use3d_true attempt=1
+[JOB] queue=gpu-pro gmem=30G mem=128G wall=8:00
+aih-superl40s-03
+Wed Mar  4 14:56:54 UTC 2026
+NVIDIA L40S, 46068, 0
+┏━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name    ┃ Type              ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model   │ ISTEncoder        │ 82.9 K │ train │     0 │
+│ 1 │ loss_tx │ TripletLoss       │      0 │ train │     0 │
+│ 2 │ loss_sg │ TripletMarginLoss │      0 │ train │     0 │
+└───┴─────────┴───────────────────┴────────┴───────┴───────┘
+Trainable params: 82.9 K                                                        
+Non-trainable params: 0                                                         
+Total params: 82.9 K                                                            
+Total estimated model params size (MB): 0                                       
+Modules in train mode: 76                                                       
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/logs/use3d_true.attempt1.err> for stderr output of this job.
+
+Sender: LSF System <lsfadmin@lsf22-gpu03>
+Subject: Job 47480270: <segger_xenium_nsclc_use3d_true> in cluster <DKFZ> Done
+
+Job <segger_xenium_nsclc_use3d_true> was submitted from host <hdf18-gpu02.dkfz-heidelberg.de> by user <e915i> in cluster <DKFZ> at Wed Mar  4 14:01:14 2026
+Job was executed on host(s) <8*lsf22-gpu03>, in queue <gpu-pro>, as user <e915i> in cluster <DKFZ> at Wed Mar  4 14:01:15 2026
+</home/e915i> was used as the home directory.
+</dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0> was used as the working directory.
+Started at Wed Mar  4 14:01:15 2026
+Terminated at Wed Mar  4 16:34:10 2026
+Results reported at Wed Mar  4 16:34:10 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -J segger_xenium_nsclc_use3d_true
+#BSUB -o /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/logs/use3d_true.attempt1.out
+#BSUB -e /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/logs/use3d_true.attempt1.err
+#BSUB -L /bin/bash
+#BSUB -q gpu-pro
+#BSUB -W 8:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=128G]"
+#BSUB -M 128G
+#BSUB -gpu "num=1:j_exclusive=yes:gmem=30G"
+
+
+set -euo pipefail
+
+write_segment_status() {
+  local stage_status="$1"
+  local stage_rc="${2:-0}"
+  printf 'segment_status=%s\nsegment_rc=%s\n' "${stage_status}" "${stage_rc}" > /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/runs/use3d_true/.segment_status
+}
+
+classify_segment_status() {
+  local stage_rc="$1"
+  case "${stage_rc}" in
+    137|140) printf '%s_oom' segment ;;
+    138|143) printf '%s_runlimit' segment ;;
+    *) printf '%s_error' segment ;;
+  esac
+}
+
+on_primary_exit() {
+  local rc=$?
+  local current_status=""
+  trap - EXIT INT TERM HUP
+  if [[ -f /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/runs/use3d_true/.segment_status ]]; then
+    current_status="$(awk -F'=' '$1 == \"segment_status\" { print $2; exit }' /omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/runs/use3d_true/.segment_status 2>/dev/null || true)"
+  fi
+  if [[ "${rc}" -ne 0 ]] && [[ "${current_status}" != segment_ok ]]; then
+    write_segment_status "$(classify_segment_status "${rc}")" "${rc}"
+  elif [[ -z "${current_status}" ]]; then
+    write_segment_status "pending" "${rc}"
+  fi
+  exit "${rc}"
+}
+
+trap on_primary_exit EXIT INT TERM HUP
+
+cd /dkfz/cluster/gpu/data/OE0606/elihei/segger-0.2.0
+set +u
+if [[ 0 != "1" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   13684.00 sec.
+    Max Memory :                                 111803 MB
+    Average Memory :                             50054.64 MB
+    Total Requested Memory :                     131072.00 MB
+    Delta Memory :                               19269.00 MB
+    Max Swap :                                   -
+    Max Processes :                              28
+    Max Threads :                                597
+    Run time :                                   9172 sec.
+    Turnaround time :                            9176 sec.
+
+The output (if any) follows:
+
+[JOB] dataset=xenium_nsclc job=use3d_true attempt=1
+[JOB] queue=gpu-pro gmem=30G mem=128G wall=8:00
+lsf22-gpu03
+Wed Mar  4 14:01:19 CET 2026
+NVIDIA A100-PCIE-40GB, 40960, 0
+┏━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name    ┃ Type              ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model   │ ISTEncoder        │ 82.9 K │ train │     0 │
+│ 1 │ loss_tx │ TripletLoss       │      0 │ train │     0 │
+│ 2 │ loss_sg │ TripletMarginLoss │      0 │ train │     0 │
+└───┴─────────┴───────────────────┴────────┴───────┴───────┘
+Trainable params: 82.9 K                                                        
+Non-trainable params: 0                                                         
+Total params: 82.9 K                                                            
+Total estimated model params size (MB): 0                                       
+Modules in train mode: 76                                                       
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+Epoch 19/19 ━━━━━━━━━━━━━━━━ 756/756 0:03:07 •        4.25it/s v_num: 1.000     
+                                     0:00:00                   train:loss: 0.063
+                                                               train:loss_tx:   
+                                                               0.003            
+                                                               train:loss_bd:   
+                                                               0.102            
+                                                               train:loss_sg:   
+                                                               0.106 val:loss:  
+                                                               0.062            
+                                                               val:loss_tx:     
+                                                               0.002            
+                                                               val:loss_bd:     
+                                                               0.102            
+                                                               val:loss_sg:     
+                                                               0.105            
+Predicting ━━━━━━━╸                       1903/7164 1:04:15 • 3:07:31 0.47it/s 
+[JOB] segger_rc=0
+[JOB] completed
+
+
+PS:
+
+Read file </omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed/datasets/xenium_nsclc/logs/use3d_true.attempt1.err> for stderr output of this job.
+
