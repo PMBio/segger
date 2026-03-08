@@ -75,13 +75,16 @@ def test_anndata_writer_emits_split_outputs(tmp_path):
     assert cells.n_obs == 2
     assert fragments.n_obs == 1
 
-    assert combined.obs.loc["fragment-7", FRAGMENT_FLAG_COLUMN]
-    assert not combined.obs.loc["cell-1", FRAGMENT_FLAG_COLUMN]
     assert combined.obs.loc["fragment-7", OBJECT_TYPE_COLUMN] == OBJECT_TYPE_FRAGMENT
-    assert combined.obs.loc["cell-1", OBJECT_GROUP_COLUMN] == "cells"
+    assert OBJECT_GROUP_COLUMN not in combined.obs.columns
+    assert FRAGMENT_FLAG_COLUMN not in combined.obs.columns
 
-    assert set(cells.obs[OBJECT_TYPE_COLUMN]) == {OBJECT_TYPE_CELL}
-    assert set(fragments.obs[OBJECT_TYPE_COLUMN]) == {OBJECT_TYPE_FRAGMENT}
+    assert OBJECT_TYPE_COLUMN not in cells.obs.columns
+    assert OBJECT_GROUP_COLUMN not in cells.obs.columns
+    assert FRAGMENT_FLAG_COLUMN not in cells.obs.columns
+    assert OBJECT_TYPE_COLUMN not in fragments.obs.columns
+    assert OBJECT_GROUP_COLUMN not in fragments.obs.columns
+    assert FRAGMENT_FLAG_COLUMN not in fragments.obs.columns
     assert all(not str(idx).startswith("fragment-") for idx in cells.obs_names)
 
 
@@ -114,7 +117,12 @@ def test_anndata_writer_skips_fragment_output_when_none_present(tmp_path):
 
     assert combined.n_obs == 2
     assert cells.n_obs == 2
-    assert set(cells.obs[OBJECT_TYPE_COLUMN]) == {OBJECT_TYPE_CELL}
+    assert set(combined.obs[OBJECT_TYPE_COLUMN]) == {OBJECT_TYPE_CELL}
+    assert OBJECT_GROUP_COLUMN not in combined.obs.columns
+    assert FRAGMENT_FLAG_COLUMN not in combined.obs.columns
+    assert OBJECT_TYPE_COLUMN not in cells.obs.columns
+    assert OBJECT_GROUP_COLUMN not in cells.obs.columns
+    assert FRAGMENT_FLAG_COLUMN not in cells.obs.columns
     assert all(not str(idx).startswith("fragment-") for idx in cells.obs_names)
     assert not (tmp_path / "segger_fragments.h5ad").exists()
 
