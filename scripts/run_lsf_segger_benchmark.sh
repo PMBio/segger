@@ -45,7 +45,7 @@ Environment overrides:
   ROUTE_ELIGIBLE_TO_GPU      1 to route jobs that fit standard limits to GPU_QUEUE_DEFAULT
   GPU_QUEUE_DEFAULT          Queue for standard GPU jobs (default: gpu)
   GPU_QUEUE_PRO              Queue for high-memory GPU jobs (default: gpu-pro)
-  EXPORT_QUEUE               Queue for export jobs (default: GPU_QUEUE_DEFAULT)
+  EXPORT_QUEUE               Queue for export jobs (default: long)
   ALIGNMENT_GPU_QUEUE        Optional override queue only for align_* jobs
   GPU_QUEUE_MAX_GMEM         Max GPU memory (GB) for GPU_QUEUE_DEFAULT routing (default: 31)
   GPU_QUEUE_MAX_MEM_GB       Max RAM (GB) for GPU_QUEUE_DEFAULT routing (default: 384)
@@ -163,9 +163,11 @@ xenium_crc
 xenium_nsclc
 xenium_v1_colon
 xenium_mouse_liver
+xenium_breast
 xenium_v1_breast
 xenium_mouse_brain
 merscope_mouse_brain
+merscope_mouse_liver
 cosmx_human_pancreas
 EOF
 }
@@ -190,7 +192,7 @@ root_known_dataset_keys() {
 
 is_known_dataset() {
   case "${1:-}" in
-    xenium_crc|xenium_nsclc|xenium_v1_colon|xenium_mouse_liver|xenium_v1_breast|xenium_mouse_brain|merscope_mouse_brain|cosmx_human_pancreas)
+    xenium_crc|xenium_nsclc|xenium_v1_colon|xenium_mouse_liver|xenium_breast|xenium_v1_breast|xenium_mouse_brain|merscope_mouse_brain|merscope_mouse_liver|cosmx_human_pancreas)
       return 0
       ;;
     *)
@@ -205,9 +207,11 @@ dataset_input_dir() {
     xenium_nsclc) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_nscls/xenium_fixed" ;;
     xenium_v1_colon) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_v1_colon_fixed" ;;
     xenium_mouse_liver) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_mouse_liver_fixed" ;;
+    xenium_breast) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_breast" ;;
     xenium_v1_breast) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_v1_breast_fixed" ;;
     xenium_mouse_brain) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/xenium_mouse_brain_fixed" ;;
     merscope_mouse_brain) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/MERSCOPE_brain" ;;
+    merscope_mouse_liver) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/merscope_mouse_liver/processed" ;;
     cosmx_human_pancreas) printf '%s' "/dkfz/cluster/gpu/data/OE0606/fengyun/data/CosMx_pancreas" ;;
     *)
       return 1
@@ -230,8 +234,11 @@ dataset_primary_ref() {
     xenium_mouse_liver)
       printf '%s' "${cache_root}/mus_musculus/liver/liver.h5ad"
       ;;
-    xenium_v1_breast)
+    xenium_breast|xenium_v1_breast)
       printf '%s' "${cache_root}/homo_sapiens/breast/breast.h5ad"
+      ;;
+    merscope_mouse_liver)
+      printf '%s' "${cache_root}/mus_musculus/liver/liver.h5ad"
       ;;
     xenium_mouse_brain|merscope_mouse_brain)
       printf '%s' "${cache_root}/mus_musculus/brain/brain.h5ad"
@@ -256,8 +263,11 @@ dataset_fallback_ref() {
     xenium_mouse_liver)
       printf '%s' "${SCRNA_REF_ROOT}/mouse_liver_cellxgene_a34c8af2.h5ad"
       ;;
-    xenium_v1_breast)
+    xenium_breast|xenium_v1_breast)
       printf '%s' "${SCRNA_REF_ROOT}/breast_cancer_annotated.h5ad"
+      ;;
+    merscope_mouse_liver)
+      printf '%s' "${SCRNA_REF_ROOT}/mouse_liver_cellxgene_a34c8af2.h5ad"
       ;;
     xenium_mouse_brain|merscope_mouse_brain)
       printf '%s' "${SCRNA_REF_ROOT}/mouse_brain.h5ad"
@@ -275,8 +285,8 @@ dataset_tissue_type() {
   case "${1:-}" in
     xenium_crc|xenium_v1_colon) printf '%s' "colon" ;;
     xenium_nsclc) printf '%s' "lung" ;;
-    xenium_mouse_liver) printf '%s' "liver" ;;
-    xenium_v1_breast) printf '%s' "breast" ;;
+    xenium_mouse_liver|merscope_mouse_liver) printf '%s' "liver" ;;
+    xenium_breast|xenium_v1_breast) printf '%s' "breast" ;;
     xenium_mouse_brain|merscope_mouse_brain) printf '%s' "brain" ;;
     cosmx_human_pancreas) printf '%s' "pancreas" ;;
     *)
@@ -287,10 +297,10 @@ dataset_tissue_type() {
 
 dataset_organism() {
   case "${1:-}" in
-    xenium_crc|xenium_nsclc|xenium_v1_colon|xenium_v1_breast|cosmx_human_pancreas)
+    xenium_crc|xenium_nsclc|xenium_v1_colon|xenium_breast|xenium_v1_breast|cosmx_human_pancreas)
       printf '%s' "homo_sapiens"
       ;;
-    xenium_mouse_liver|xenium_mouse_brain|merscope_mouse_brain)
+    xenium_mouse_liver|xenium_mouse_brain|merscope_mouse_brain|merscope_mouse_liver)
       printf '%s' "mus_musculus"
       ;;
     *)
@@ -533,7 +543,7 @@ resolve_requested_datasets() {
           resolved_any=1
         fi
       done <<EOF
-$(root_known_dataset_keys)
+$(all_dataset_keys)
 EOF
       if [[ "${resolved_any}" -eq 0 ]]; then
         if [[ -d "${OUTPUT_ROOT}/datasets" ]] && find "${OUTPUT_ROOT}/datasets" -mindepth 1 -maxdepth 1 -type d | read -r _; then
@@ -745,7 +755,7 @@ xenium_export_supported_for_input() {
 dataset_segment_mem_gb() {
   case "${1:-}" in
     xenium_mouse_brain) printf '512' ;;
-    xenium_nsclc|xenium_mouse_liver) printf '256' ;;
+    xenium_nsclc|xenium_mouse_liver|merscope_mouse_liver) printf '256' ;;
     xenium_crc|xenium_v1_colon) printf '192' ;;
     *) printf '128' ;;
   esac
@@ -761,7 +771,7 @@ dataset_segment_gmem() {
 dataset_segment_wall_time() {
   case "${1:-}" in
     xenium_mouse_brain) printf '12:00' ;;
-    xenium_nsclc|xenium_mouse_liver) printf '10:00' ;;
+    xenium_nsclc|xenium_mouse_liver|merscope_mouse_liver) printf '10:00' ;;
     *) printf '%s' "${SEGMENT_WALL_TIME_DEFAULT}" ;;
   esac
 }
@@ -776,7 +786,7 @@ dataset_predict_mem_gb() {
     esac
   else
     case "${dataset}" in
-      xenium_nsclc|xenium_mouse_liver|xenium_crc|xenium_v1_colon) printf '192' ;;
+      xenium_nsclc|xenium_mouse_liver|merscope_mouse_liver|xenium_crc|xenium_v1_colon) printf '192' ;;
       *) printf '128' ;;
     esac
   fi
@@ -797,14 +807,14 @@ dataset_predict_wall_time() {
   if [[ "${fragment}" == "true" ]]; then
     case "${dataset}" in
       xenium_mouse_brain) printf '16:00' ;;
-      xenium_nsclc|xenium_mouse_liver|xenium_crc|xenium_v1_colon) printf '12:00' ;;
+      xenium_nsclc|xenium_mouse_liver|merscope_mouse_liver|xenium_crc|xenium_v1_colon) printf '12:00' ;;
       *) printf '10:00' ;;
     esac
     return 0
   fi
   case "${dataset}" in
     xenium_mouse_brain) printf '12:00' ;;
-    xenium_nsclc|xenium_mouse_liver) printf '10:00' ;;
+    xenium_nsclc|xenium_mouse_liver|merscope_mouse_liver) printf '10:00' ;;
     *) printf '%s' "${SEGMENT_WALL_TIME_DEFAULT}" ;;
   esac
 }
@@ -812,7 +822,7 @@ dataset_predict_wall_time() {
 dataset_tiling_margin_training() {
   case "${1:-}" in
     xenium_mouse_brain) printf '4' ;;
-    xenium_v1_breast) printf '6' ;;
+    xenium_breast|xenium_v1_breast) printf '6' ;;
     *) printf '8' ;;
   esac
 }
@@ -820,7 +830,7 @@ dataset_tiling_margin_training() {
 dataset_tiling_margin_prediction() {
   case "${1:-}" in
     xenium_mouse_brain) printf '4' ;;
-    xenium_v1_breast) printf '6' ;;
+    xenium_breast|xenium_v1_breast) printf '6' ;;
     *) printf '8' ;;
   esac
 }
@@ -1058,7 +1068,11 @@ on_primary_exit() {
 
 trap on_primary_exit EXIT INT TERM HUP
 
-cd $(printf '%q' "${CLUSTER_CODE_ROOT}")
+if [[ -d $(printf '%q' "${CLUSTER_CODE_ROOT}") ]]; then
+  cd $(printf '%q' "${CLUSTER_CODE_ROOT}")
+else
+  echo "[JOB] WARN missing code_root=$(printf '%q' "${CLUSTER_CODE_ROOT}"); continuing from \$(pwd)" >&2
+fi
 ${activation_block}
 
 echo "[JOB] dataset=${dataset} job=${job} attempt=${attempt}"
@@ -1198,7 +1212,11 @@ on_export_exit() {
 
 trap on_export_exit EXIT INT TERM HUP
 
-cd $(printf '%q' "${CLUSTER_CODE_ROOT}")
+if [[ -d $(printf '%q' "${CLUSTER_CODE_ROOT}") ]]; then
+  cd $(printf '%q' "${CLUSTER_CODE_ROOT}")
+else
+  echo "[JOB] WARN missing code_root=$(printf '%q' "${CLUSTER_CODE_ROOT}"); continuing from \$(pwd)" >&2
+fi
 ${activation_block}
 
 echo "[JOB] dataset=${dataset} job=${job} export attempt=${attempt}"
@@ -1854,7 +1872,7 @@ MAX_ACTIVE_FRAGMENT="${MAX_ACTIVE_FRAGMENT:-2}"
 ROUTE_ELIGIBLE_TO_GPU="$(normalize_bool "${ROUTE_ELIGIBLE_TO_GPU:-1}")"
 GPU_QUEUE_DEFAULT="${GPU_QUEUE_DEFAULT:-gpu}"
 GPU_QUEUE_PRO="${GPU_QUEUE_PRO:-gpu-pro}"
-EXPORT_QUEUE="${EXPORT_QUEUE:-${GPU_QUEUE_DEFAULT}}"
+EXPORT_QUEUE="${EXPORT_QUEUE:-long}"
 ALIGNMENT_GPU_QUEUE="${ALIGNMENT_GPU_QUEUE:-}"
 GPU_QUEUE_MAX_GMEM="${GPU_QUEUE_MAX_GMEM:-31}"
 GPU_QUEUE_MAX_MEM_GB="${GPU_QUEUE_MAX_MEM_GB:-384}"
