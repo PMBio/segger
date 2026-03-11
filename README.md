@@ -34,12 +34,92 @@ pip install -e .
 
 # Usage
 
-You can run **segger** from the command line with:
+Show top-level CLI help:
 ```bash
-segger segment -i /path/to/your/ist/data/ -o /path/to/save/outputs/
+segger --help
 ```
 
-To see all available parameter options:
+## Modes
+
+### `segger segment`
+Train + predict in one run (end-to-end segmentation).
+```bash
+segger segment -i /path/to/input_data -o /path/to/run_output
+```
+
+### `segger predict`
+Run prediction-only from a saved checkpoint.
+```bash
+segger predict \
+  -c /path/to/checkpoint.ckpt \
+  -i /path/to/input_data \
+  -o /path/to/predict_output
+```
+
+### `segger export`
+Convert segmentation outputs to downstream formats (`xenium_explorer`, `merged`, `anndata`, `spatialdata`).
+```bash
+segger export \
+  -s /path/to/segger_segmentation.parquet \
+  -i /path/to/source_data \
+  -o /path/to/export_output \
+  --format xenium_explorer
+```
+
+### `segger validate`
+Compute lightweight quality metrics from Segger outputs.
+```bash
+segger validate \
+  -s /path/to/segger_segmentation.parquet \
+  -i /path/to/source_data \
+  -o /path/to/validation_metrics.tsv
+```
+
+Run selected metrics only:
+```bash
+segger validate \
+  -s /path/to/segger_segmentation.parquet \
+  -i /path/to/source_data \
+  --assigned --border-contamination --vsi
+```
+
+### `segger plot`
+Plot training curves from `metrics.csv` in an output directory.
+```bash
+segger plot -o /path/to/run_output
+```
+
+Quick terminal plot (no image written):
+```bash
+segger plot -o /path/to/run_output --quick
+```
+
+### `segger atlas`
+Reference management subcommands for CellxGENE Census:
+```bash
+segger atlas fetch colon
+segger atlas preview colon
+segger atlas list
+segger atlas clear --tissue colon
+```
+
+## Help per mode
+
+Use mode-specific help for the full parameter list:
 ```bash
 segger segment --help
+segger predict --help
+segger export --help
+segger validate --help
+segger plot --help
+segger atlas --help
+```
+
+## Optional extras
+
+Install optional dependencies as needed:
+```bash
+pip install "segger[plot]"        # for plotting support
+pip install "segger[spatialdata]" # for SpatialData input/output
+pip install "segger[census]"      # for atlas reference fetching
 ```
