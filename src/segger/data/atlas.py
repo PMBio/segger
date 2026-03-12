@@ -555,6 +555,38 @@ def _write_metadata(meta_path: Path, meta: dict) -> None:
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
 
+def _set_var_names_from_feature_column(
+    adata: "ad.AnnData",
+    feature_column: str = "feature_name",
+) -> bool:
+    """Promote ``adata.var[feature_column]`` into ``adata.var_names``.
+
+    Empty/NA feature values fall back to existing var_names. Returns ``True``
+    when var_names were updated.
+    """
+    if feature_column not in adata.var.columns:
+        return False
+
+    original = [str(value) for value in adata.var_names]
+    feature_values = adata.var[feature_column].astype("string").fillna("")
+
+    promoted: list[str] = []
+    for fallback, raw in zip(original, feature_values.astype(str).tolist()):
+        token = raw.strip()
+        if not token or token.lower() in {"nan", "none"}:
+            promoted.append(fallback)
+        else:
+            promoted.append(token)
+
+    changed = promoted != original
+    if changed:
+        adata.var_names = promoted
+    if not adata.var_names.is_unique:
+        adata.var_names_make_unique()
+        changed = True
+    return changed
+
+
 def _build_reference_from_metadata(meta_path: Path) -> AtlasReference:
     """Reconstruct an ``AtlasReference`` from the JSON sidecar."""
     meta = _load_metadata(meta_path)
@@ -1179,6 +1211,7 @@ def fetch_reference(
     adata.obs["cell_type"] = adata.obs["cell_type"].cat.remove_unused_categories()
     final_types = sorted(adata.obs["cell_type"].cat.categories.tolist())
     immune_only = _immune_only_guess(final_types)
+    _set_var_names_from_feature_column(adata, feature_column="feature_name")
 
     # Atomic write
     h5ad.parent.mkdir(parents=True, exist_ok=True)
@@ -1202,6 +1235,7 @@ def fetch_reference(
         "n_obs": int(adata.n_obs),
         "n_cell_types": len(final_types),
         "cell_type_column": "cell_type",
+        "var_name_column": "feature_name",
         "immune_only": immune_only,
         "cell_type_preview": final_types[:30],
         "max_cells_per_type": max_cells_per_type,

@@ -1226,28 +1226,20 @@ class MerscopePreprocessor(ISTPreprocessor):
         if self.min_qv is not None and self.min_qv > 0 and quality_col is not None:
             lf = lf.filter(pl.col(quality_col) >= self.min_qv)
 
-        rename_map = {
-            x_col: std.x,
-            y_col: std.y,
-            feature_col: std.feature,
-        }
-        select_cols = [std.row_index, std.x, std.y, std.feature, std.cell_id, std.compartment]
+        select_exprs: list[pl.Expr] = [
+            pl.col(std.row_index),
+            pl.col(x_col).alias(std.x),
+            pl.col(y_col).alias(std.y),
+            pl.col(feature_col).alias(std.feature),
+            cell_id_expr.alias(std.cell_id),
+            compartment_expr,
+        ]
 
-        lf = (
-            lf
-            .with_columns([
-                cell_id_expr.alias(std.cell_id),
-                compartment_expr,
-            ])
-            .rename(rename_map)
-            .with_row_index(name=std.row_index)
-        )
-
+        lf = lf.with_row_index(name=std.row_index)
         if self.include_z and z_col is not None:
-            lf = lf.rename({z_col: std.z})
-            select_cols.append(std.z)
+            select_exprs.append(pl.col(z_col).alias(std.z))
 
-        return lf.select(select_cols).collect()
+        return lf.select(select_exprs).collect()
 
     @staticmethod
     def _empty_boundaries() -> gpd.GeoDataFrame:

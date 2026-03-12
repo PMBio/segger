@@ -228,6 +228,7 @@ class ISTDataModule(LightningDataModule):
                     self.me_gene_pairs, _ = load_me_genes_from_scrna(
                         scrna_path=Path(self.scrna_reference_path),
                         cell_type_column=self.scrna_celltype_column,
+                        gene_name_column="feature_name",
                     )
                 else:
                     raise ValueError(
