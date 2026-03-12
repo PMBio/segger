@@ -53,6 +53,48 @@ def _resolve_cell_type_column(
     )
 
 
+def _resolve_gene_name_column(
+    adata: ad.AnnData,
+    gene_name_column: Optional[str],
+) -> Optional[str]:
+    """Resolve gene-name source column with feature_name fallback."""
+    if gene_name_column is not None:
+        if gene_name_column in adata.var.columns:
+            return gene_name_column
+        warnings.warn(
+            f"Requested gene_name_column={gene_name_column!r} not found in reference var; "
+            "falling back to var_names.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    if "feature_name" in adata.var.columns:
+        return "feature_name"
+    return None
+
+
+def _set_var_names_from_column(
+    adata: ad.AnnData,
+    column_name: str,
+) -> None:
+    """Promote var column values to var_names with safe fallbacks."""
+    original = [str(value) for value in adata.var_names]
+    values = adata.var[column_name].astype("string").fillna("")
+    promoted: list[str] = []
+    for fallback, raw in zip(original, values.astype(str).tolist()):
+        token = raw.strip()
+        if not token or token.lower() in {"nan", "none"}:
+            promoted.append(fallback)
+        else:
+            promoted.append(token)
+
+    if promoted != original:
+        adata.var_names = promoted
+    if not adata.var_names.is_unique:
+        adata.var_names_make_unique()
+
+
 def find_markers(
     adata: ad.AnnData,
     cell_type_column: str,
@@ -381,9 +423,10 @@ def load_me_genes_from_scrna(
         sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
 
-    # Optionally remap gene names
-    if gene_name_column is not None and gene_name_column in adata.var.columns:
-        adata.var_names = adata.var[gene_name_column]
+    # Optionally remap gene names (defaults to feature_name when present).
+    resolved_gene_name_column = _resolve_gene_name_column(adata, gene_name_column)
+    if resolved_gene_name_column is not None:
+        _set_var_names_from_column(adata, resolved_gene_name_column)
 
     # Find markers
     with warnings.catch_warnings():
@@ -458,7 +501,7 @@ def me_gene_pairs_to_indices(
             index_pairs.append((gene_to_idx[gene1], gene_to_idx[gene2]))
 
     return index_pairs
-_ME_CACHE_VERSION = 3
+_ME_CACHE_VERSION = 4
 _ME_MAX_CELLS_PER_TYPE = 1000
 
 
