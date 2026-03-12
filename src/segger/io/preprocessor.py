@@ -980,6 +980,9 @@ class XeniumPreprocessor(ISTPreprocessor):
         # 10X Xenium nucleus segmentation is intersection of geometries
         idx = cells.index.intersection(nuclei.index)
         if len(idx) > 0 and has_cell and has_nuc:
+            import shapely
+            cells.loc[idx, cells.geometry.name] = shapely.make_valid(cells.loc[idx].geometry)
+            nuclei.loc[idx, nuclei.geometry.name] = shapely.make_valid(nuclei.loc[idx].geometry)
             _ = cells.loc[idx].intersection(nuclei.loc[idx])
 
         if len(cells) == 0 and len(nuclei) > 0:
