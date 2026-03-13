@@ -18,7 +18,7 @@ import math
 import re
 import statistics
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -37,22 +37,26 @@ from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 FALLBACK_DATASET_TRANSCRIPTS = {
     "xenium_crc": 35_042_827.0,
     "xenium_v1_colon": 65_047_433.0,
+    "xenium_breast": 92_810_244.0,
     "xenium_v1_breast": 995_676.0,
     "xenium_nsclc": 147_069_015.0,
     "xenium_mouse_brain": 186_756_695.0,
     "xenium_mouse_liver": 178_711_670.0,
     "merscope_mouse_brain": 70_514_304.0,
+    "merscope_mouse_liver": 419_524_961.0,
     "cosmx_human_pancreas": 64_960_677.0,
 }
 
 DATASET_LABELS = {
     "xenium_crc": "Xenium Human CRC",
     "xenium_v1_colon": "Xenium Human Colon",
+    "xenium_breast": "Xenium Human Breast",
     "xenium_v1_breast": "Xenium 5K Human Breast",
     "xenium_nsclc": "Xenium Lung Cancer",
     "xenium_mouse_brain": "Xenium 5K Mouse Brain",
     "xenium_mouse_liver": "Xenium Mouse Liver",
     "merscope_mouse_brain": "MERSCOPE Mouse Brain",
+    "merscope_mouse_liver": "MERSCOPE Mouse Liver",
     "cosmx_human_pancreas": "CosMX Human Pancreas",
 }
 
@@ -76,8 +80,8 @@ MODE_ORDER = [
 MODE_LABELS = {
     "baseline": "Baseline",
     "use3d_true": "Use3D",
-    "pred_frag_off": "Pred (frag off)",
-    "pred_frag_on": "Pred (frag on)",
+    "pred_frag_off": "Frag. off (baseline)",
+    "pred_frag_on": "Frag. on",
     "pred_sf1p2_fragoff": "Pred SF1.2 (frag off)",
     "pred_sf1p2_fragon": "Pred SF1.2 (frag on)",
     "pred_sf2p2_fragoff": "Pred SF2.2 (frag off)",
@@ -150,7 +154,7 @@ SEG_BENCH_ID_TO_DATASET_KEY = {
     "xenium_nscls": "xenium_nsclc",
     "xenium_mouse_liver": "xenium_mouse_liver",
     "xenium_CRC": "xenium_crc",
-    "xenium_breast": "xenium_v1_breast",
+    "xenium_breast": "xenium_breast",
     "xenium_mouse_brain": "xenium_mouse_brain",
     "MERSCOPE_brain": "merscope_mouse_brain",
     "CosMx_pancreas": "cosmx_human_pancreas",
@@ -159,11 +163,13 @@ SEG_BENCH_ID_TO_DATASET_KEY = {
 DATASET_ICON_FILES = {
     "xenium_crc": "icon_colon_v2.png",
     "xenium_v1_colon": "icon_colon_v2.png",
+    "xenium_breast": "icon_breast_small.png",
     "xenium_v1_breast": "icon_breast_small.png",
     "xenium_nsclc": "icon_lung_v2.png",
     "xenium_mouse_brain": "icon_brain_small.png",
     "xenium_mouse_liver": "icon_liver_small.png",
     "merscope_mouse_brain": "icon_brain_small.png",
+    "merscope_mouse_liver": "icon_liver_small.png",
     "cosmx_human_pancreas": "icon_pancreas_small.png",
 }
 
@@ -177,9 +183,11 @@ DATASET_ICON_PLATFORM_COLORS = {
     "xenium_v1_colon": "#6BA3D4",       # xenium_v1
     "xenium_nsclc": "#6BA3D4",          # xenium_v1
     "xenium_mouse_liver": "#6BA3D4",    # xenium_v1
+    "xenium_breast": "#B8A3D4",         # xenium_prime5k
     "xenium_v1_breast": "#B8A3D4",      # xenium_prime5k
     "xenium_mouse_brain": "#B8A3D4",    # xenium_prime5k
     "merscope_mouse_brain": "#D47B8A",  # merscope
+    "merscope_mouse_liver": "#D47B8A",  # merscope
     "cosmx_human_pancreas": "#D4A574",  # cosmx
 }
 
@@ -189,6 +197,16 @@ TERMINATED_RE = re.compile(r"^Terminated at\s+(?P<value>.+)$")
 RUN_TIME_RE = re.compile(r"^\s*Run time\s*:\s*(?P<value>[0-9.]+)\s*sec\.?\s*$")
 MAX_MEMORY_RE = re.compile(r"^\s*Max Memory\s*:\s*(?P<value>[0-9.]+)\s*MB\s*$")
 SEGGER_RC_RE = re.compile(r"^\[JOB\]\s+segger_rc=(?P<value>-?\d+)\s*$")
+JOB_QUEUE_RE = re.compile(
+    r"^\[JOB\]\s+queue=(?P<queue>\S+)\s+gmem=(?P<gmem>[0-9]+(?:\.[0-9]+)?)G\s+mem=(?P<mem>[0-9]+(?:\.[0-9]+)?)G\s+wall=(?P<wall>[0-9:]+)\s*$"
+)
+GPU_SNAPSHOT_RE = re.compile(
+    r"^(?P<gpu_name>[^,]+),\s*(?P<total_mb>[0-9]+(?:\.[0-9]+)?),\s*(?P<used_mb>[0-9]+(?:\.[0-9]+)?)\s*$"
+)
+OOM_PROCESS_MEM_IN_USE_RE = re.compile(
+    r"this process has\s+(?P<value>[0-9]+(?:\.[0-9]+)?)\s*(?P<unit>GiB|MiB)\s+memory in use",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -204,6 +222,7 @@ class RunRecord:
     terminated_at: datetime | None
     run_time_s: float
     max_memory_mb: float
+    max_vram_mb: float | None
     segger_rc: int | None
 
     def rank_key(self) -> tuple[int, datetime, datetime]:
@@ -220,9 +239,19 @@ class AggregatedRecord:
     mode: str
     runtime_s: float
     max_memory_mb: float
+    max_vram_mb: float | None
     n_runs: int
     source_roots: str
     source_logs_count: int
+
+
+@dataclass(frozen=True)
+class VramEstimate:
+    worked_max_mb: float | None
+    failed_max_mb: float | None
+    estimate_mb: float | None
+    worked_n: int
+    failed_n: int
 
 
 def parse_lsf_datetime(value: str) -> datetime | None:
@@ -231,6 +260,174 @@ def parse_lsf_datetime(value: str) -> datetime | None:
         return datetime.strptime(cleaned, "%a %b %d %H:%M:%S %Y")
     except ValueError:
         return None
+
+
+def _to_mb(value: float, unit: str) -> float:
+    unit_norm = unit.strip().lower()
+    if unit_norm == "gib":
+        return value * 1024.0
+    if unit_norm == "mib":
+        return value
+    return value
+
+
+def parse_oom_vram_mb(err_text: str) -> float | None:
+    """Best-effort VRAM peak from stderr OOM traces.
+
+    Example line:
+    "... this process has 39.43 GiB memory in use ..."
+    """
+    values_mb: list[float] = []
+    for match in OOM_PROCESS_MEM_IN_USE_RE.finditer(err_text or ""):
+        value = float(match.group("value"))
+        unit = match.group("unit")
+        values_mb.append(_to_mb(value, unit))
+    if not values_mb:
+        return None
+    return max(values_mb)
+
+
+def _safe_float(value: str | None) -> float | None:
+    text = str(value or "").strip()
+    if not text or text in {"-", "nan", "None", "none", "NULL", "null"}:
+        return None
+    try:
+        parsed = float(text)
+    except ValueError:
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def discover_status_snapshot_paths(
+    roots: list[Path],
+    explicit_paths: list[Path] | None,
+) -> list[Path]:
+    candidates: list[Path] = []
+    if explicit_paths:
+        candidates.extend(explicit_paths)
+    else:
+        for root in roots:
+            candidates.append(root / "summaries" / "aggregate_status_snapshot.tsv")
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if not resolved.is_file():
+            continue
+        if resolved in seen:
+            continue
+        out.append(resolved)
+        seen.add(resolved)
+    return out
+
+
+def _infer_dataset_from_status_path(path: Path) -> str | None:
+    # Supports .../datasets/<dataset>/summaries/status_snapshot.tsv inputs.
+    parts = path.parts
+    for idx, part in enumerate(parts):
+        if part == "datasets" and (idx + 2) < len(parts):
+            return parts[idx + 1]
+    return None
+
+
+def _status_row_vram_mb(
+    row: dict[str, str],
+    *,
+    fallback_to_requested_gmem: bool,
+) -> float | None:
+    max_vram_mb = _safe_float(row.get("max_vram_mb"))
+    if max_vram_mb is not None and max_vram_mb > 0:
+        return float(max_vram_mb)
+
+    max_vram_gb = _safe_float(row.get("max_vram_gb"))
+    if max_vram_gb is not None and max_vram_gb > 0:
+        return float(max_vram_gb * 1024.0)
+
+    if not fallback_to_requested_gmem:
+        return None
+
+    requested_gmem_gb = _safe_float(row.get("requested_gmem_gb"))
+    if requested_gmem_gb is not None and requested_gmem_gb > 0:
+        return float(requested_gmem_gb * 1024.0)
+    return None
+
+
+def load_status_snapshot_vram_mb(
+    paths: list[Path],
+    *,
+    fallback_to_requested_gmem: bool,
+) -> dict[tuple[str, str], float]:
+    out: dict[tuple[str, str], float] = {}
+    for path in paths:
+        dataset_hint = _infer_dataset_from_status_path(path)
+        try:
+            with path.open("r", newline="") as handle:
+                reader = csv.DictReader(handle, delimiter="\t")
+                for row in reader:
+                    mode = str(row.get("job", "")).strip() or str(row.get("mode", "")).strip()
+                    if not mode:
+                        continue
+
+                    dataset = str(row.get("dataset", "")).strip()
+                    if not dataset and dataset_hint is not None:
+                        dataset = dataset_hint
+                    if not dataset:
+                        continue
+
+                    max_vram_mb = _status_row_vram_mb(
+                        row,
+                        fallback_to_requested_gmem=fallback_to_requested_gmem,
+                    )
+                    if max_vram_mb is None or max_vram_mb <= 0:
+                        continue
+
+                    key = (dataset, mode)
+                    prev = out.get(key)
+                    if prev is None or max_vram_mb > prev:
+                        out[key] = float(max_vram_mb)
+        except OSError:
+            continue
+    return out
+
+
+def is_success_record(record: RunRecord) -> bool:
+    return record.completed and (record.segger_rc is None or record.segger_rc == 0)
+
+
+def estimate_vram_from_worked_failed(
+    records: list[RunRecord],
+) -> dict[tuple[str, str], VramEstimate]:
+    grouped: dict[tuple[str, str], list[RunRecord]] = defaultdict(list)
+    for record in records:
+        if record.max_vram_mb is None:
+            continue
+        grouped[(record.dataset, record.mode)].append(record)
+
+    out: dict[tuple[str, str], VramEstimate] = {}
+    for key, recs in grouped.items():
+        worked_values = [float(rec.max_vram_mb) for rec in recs if is_success_record(rec) and rec.max_vram_mb is not None]
+        failed_values = [float(rec.max_vram_mb) for rec in recs if (not is_success_record(rec)) and rec.max_vram_mb is not None]
+        worked_max = max(worked_values) if worked_values else None
+        failed_max = max(failed_values) if failed_values else None
+        if worked_max is not None and failed_max is not None:
+            estimate = (worked_max + failed_max) / 2.0
+        elif worked_max is not None:
+            estimate = worked_max
+        elif failed_max is not None:
+            estimate = failed_max
+        else:
+            estimate = None
+        out[key] = VramEstimate(
+            worked_max_mb=worked_max,
+            failed_max_mb=failed_max,
+            estimate_mb=estimate,
+            worked_n=len(worked_values),
+            failed_n=len(failed_values),
+        )
+    return out
 
 
 def iter_lsf_blocks(lines: Iterable[str]) -> Iterable[list[str]]:
@@ -246,7 +443,15 @@ def iter_lsf_blocks(lines: Iterable[str]) -> Iterable[list[str]]:
         yield block
 
 
-def parse_block(dataset: str, mode: str, source_root: Path, source_log: Path, block: list[str]) -> RunRecord | None:
+def parse_block(
+    dataset: str,
+    mode: str,
+    source_root: Path,
+    source_log: Path,
+    block: list[str],
+    err_text: str,
+    vram_fallback: str,
+) -> RunRecord | None:
     job_id: str | None = None
     exit_state = ""
     completed = False
@@ -254,6 +459,8 @@ def parse_block(dataset: str, mode: str, source_root: Path, source_log: Path, bl
     terminated_at: datetime | None = None
     run_time_s: float | None = None
     max_memory_mb: float | None = None
+    requested_gmem_gb: float | None = None
+    gpu_used_mb: float | None = None
     segger_rc: int | None = None
 
     for line in block:
@@ -283,6 +490,16 @@ def parse_block(dataset: str, mode: str, source_root: Path, source_log: Path, bl
             max_memory_mb = float(max_memory_match.group("value"))
             continue
 
+        queue_match = JOB_QUEUE_RE.match(line.strip())
+        if queue_match:
+            requested_gmem_gb = float(queue_match.group("gmem"))
+            continue
+
+        gpu_snapshot_match = GPU_SNAPSHOT_RE.match(line.strip())
+        if gpu_snapshot_match:
+            gpu_used_mb = float(gpu_snapshot_match.group("used_mb"))
+            continue
+
         segger_rc_match = SEGGER_RC_RE.match(line)
         if segger_rc_match:
             segger_rc = int(segger_rc_match.group("value"))
@@ -298,6 +515,16 @@ def parse_block(dataset: str, mode: str, source_root: Path, source_log: Path, bl
     if job_id is None or run_time_s is None or max_memory_mb is None:
         return None
 
+    oom_vram_mb = parse_oom_vram_mb(err_text)
+    max_vram_mb: float | None = None
+    if oom_vram_mb is not None and oom_vram_mb > 0:
+        max_vram_mb = oom_vram_mb
+    elif gpu_used_mb is not None and gpu_used_mb > 0:
+        max_vram_mb = gpu_used_mb
+    elif vram_fallback == "gmem" and requested_gmem_gb is not None and requested_gmem_gb > 0:
+        # Optional fallback only: gmem is a reservation/limit, not measured usage.
+        max_vram_mb = requested_gmem_gb * 1024.0
+
     return RunRecord(
         dataset=dataset,
         mode=mode,
@@ -310,11 +537,17 @@ def parse_block(dataset: str, mode: str, source_root: Path, source_log: Path, bl
         terminated_at=terminated_at,
         run_time_s=run_time_s,
         max_memory_mb=max_memory_mb,
+        max_vram_mb=max_vram_mb,
         segger_rc=segger_rc,
     )
 
 
-def collect_records(roots: list[Path], datasets: set[str]) -> list[RunRecord]:
+def collect_records(
+    roots: list[Path],
+    datasets: set[str],
+    *,
+    vram_fallback: str,
+) -> list[RunRecord]:
     records: list[RunRecord] = []
     for root in roots:
         datasets_root = root / "datasets"
@@ -337,9 +570,22 @@ def collect_records(roots: list[Path], datasets: set[str]) -> list[RunRecord]:
                     lines = out_log.read_text(errors="ignore").splitlines()
                 except OSError:
                     continue
+                err_log = out_log.with_suffix(".err")
+                try:
+                    err_text = err_log.read_text(errors="ignore")
+                except OSError:
+                    err_text = ""
 
                 for block in iter_lsf_blocks(lines):
-                    parsed = parse_block(dataset, mode, root, out_log, block)
+                    parsed = parse_block(
+                        dataset,
+                        mode,
+                        root,
+                        out_log,
+                        block,
+                        err_text,
+                        vram_fallback=vram_fallback,
+                    )
                     if parsed is not None:
                         records.append(parsed)
     return records
@@ -349,8 +595,10 @@ def aggregate_records(
     records: list[RunRecord],
     *,
     statistic: str,
+    runtime_statistic: str | None,
     include_incomplete: bool,
 ) -> dict[tuple[str, str], AggregatedRecord]:
+    runtime_stat = runtime_statistic or statistic
     grouped: dict[tuple[str, str], list[RunRecord]] = defaultdict(list)
     for record in records:
         if not include_incomplete:
@@ -362,24 +610,38 @@ def aggregate_records(
 
     out: dict[tuple[str, str], AggregatedRecord] = {}
     for key, recs in grouped.items():
-        if statistic == "latest":
+        latest: RunRecord | None = None
+        if runtime_stat == "latest" or statistic == "latest":
             latest = max(recs, key=lambda rec: rec.rank_key())
-            runtime_s = float(latest.run_time_s)
-            max_memory_mb = float(latest.max_memory_mb)
+
+        runtimes = [rec.run_time_s for rec in recs]
+        memories = [rec.max_memory_mb for rec in recs]
+        vrams = [rec.max_vram_mb for rec in recs if rec.max_vram_mb is not None]
+
+        if runtime_stat == "latest":
+            runtime_s = float(latest.run_time_s) if latest is not None else float(max(runtimes))
+        elif runtime_stat == "min":
+            runtime_s = float(min(runtimes))
+        elif runtime_stat == "median":
+            runtime_s = float(statistics.median(runtimes))
+        else:
+            runtime_s = float(sum(runtimes) / len(runtimes))
+
+        if statistic == "latest":
+            max_memory_mb = float(latest.max_memory_mb) if latest is not None else float(max(memories))
+            max_vram_mb = float(latest.max_vram_mb) if latest is not None and latest.max_vram_mb is not None else None
+        elif statistic == "median":
+            max_memory_mb = float(statistics.median(memories))
+            max_vram_mb = float(statistics.median(vrams)) if vrams else None
+        else:
+            max_memory_mb = float(sum(memories) / len(memories))
+            max_vram_mb = float(sum(vrams) / len(vrams)) if vrams else None
+
+        if runtime_stat == "latest" and statistic == "latest" and latest is not None:
             n_runs = 1
             source_roots = [latest.source_root]
             source_logs = {latest.source_log}
         else:
-            runtimes = [rec.run_time_s for rec in recs]
-            memories = [rec.max_memory_mb for rec in recs]
-
-            if statistic == "median":
-                runtime_s = float(statistics.median(runtimes))
-                max_memory_mb = float(statistics.median(memories))
-            else:
-                runtime_s = float(sum(runtimes) / len(runtimes))
-                max_memory_mb = float(sum(memories) / len(memories))
-
             n_runs = len(recs)
             source_roots = sorted({rec.source_root for rec in recs})
             source_logs = {rec.source_log for rec in recs}
@@ -389,6 +651,7 @@ def aggregate_records(
             mode=key[1],
             runtime_s=runtime_s,
             max_memory_mb=max_memory_mb,
+            max_vram_mb=max_vram_mb,
             n_runs=n_runs,
             source_roots=";".join(source_roots),
             source_logs_count=len(source_logs),
@@ -399,6 +662,72 @@ def aggregate_records(
 def sort_modes(modes: Iterable[str]) -> list[str]:
     mode_rank = {mode: idx for idx, mode in enumerate(MODE_ORDER)}
     return sorted(modes, key=lambda mode: (mode_rank.get(mode, 999), mode))
+
+
+def add_combined_status_snapshot_vram_mb(
+    status_snapshot_vram_mb: dict[tuple[str, str], float],
+    *,
+    include_align: bool,
+    include_pred: bool,
+) -> dict[tuple[str, str], float]:
+    """Add synthetic-mode VRAM rows from measured status-snapshot values."""
+    out = dict(status_snapshot_vram_mb)
+    datasets = sorted({dataset for dataset, _mode in status_snapshot_vram_mb.keys()})
+
+    for dataset in datasets:
+        if include_align:
+            align_values = [
+                status_snapshot_vram_mb[(dataset, mode)]
+                for mode in ALIGN_VARIANT_MODES
+                if (dataset, mode) in status_snapshot_vram_mb
+            ]
+            if align_values:
+                out[(dataset, "align_combined")] = float(sum(align_values) / len(align_values))
+
+        if include_pred:
+            pred_off_values = [
+                status_snapshot_vram_mb[(dataset, mode)]
+                for mode in PRED_FRAG_OFF_MODES
+                if (dataset, mode) in status_snapshot_vram_mb
+            ]
+            if pred_off_values:
+                out[(dataset, "pred_frag_off")] = float(sum(pred_off_values) / len(pred_off_values))
+
+            pred_on_values = [
+                status_snapshot_vram_mb[(dataset, mode)]
+                for mode in PRED_FRAG_ON_MODES
+                if (dataset, mode) in status_snapshot_vram_mb
+            ]
+            if pred_on_values:
+                out[(dataset, "pred_frag_on")] = float(sum(pred_on_values) / len(pred_on_values))
+
+    return out
+
+
+def add_combined_mode_records(
+    records: list[RunRecord],
+    *,
+    include_align: bool,
+    include_pred: bool,
+) -> list[RunRecord]:
+    """Duplicate raw records into combined synthetic modes for correct aggregation.
+
+    This keeps aggregation semantics correct for all statistics:
+    - mean: mean over all raw runs in the combined mode
+    - median: true median over all raw runs in the combined mode
+    - latest: latest successful run across all source variants in the group
+    """
+    out = list(records)
+    for record in records:
+        if include_align and record.mode in ALIGN_VARIANT_MODES:
+            out.append(replace(record, mode="align_combined"))
+
+        if include_pred:
+            if record.mode in PRED_FRAG_OFF_MODES:
+                out.append(replace(record, mode="pred_frag_off"))
+            elif record.mode in PRED_FRAG_ON_MODES:
+                out.append(replace(record, mode="pred_frag_on"))
+    return out
 
 
 def add_combined_alignment_mode(
@@ -417,6 +746,13 @@ def add_combined_alignment_mode(
 
         weighted_runtime_s = sum(rec.runtime_s * rec.n_runs for rec in records) / total_runs
         weighted_memory_mb = sum(rec.max_memory_mb * rec.n_runs for rec in records) / total_runs
+        vram_records = [rec for rec in records if rec.max_vram_mb is not None]
+        total_vram_runs = sum(rec.n_runs for rec in vram_records)
+        weighted_vram_mb = (
+            sum(float(rec.max_vram_mb) * rec.n_runs for rec in vram_records) / total_vram_runs
+            if total_vram_runs > 0
+            else None
+        )
         source_roots = sorted(
             {
                 root
@@ -431,6 +767,7 @@ def add_combined_alignment_mode(
             mode="align_combined",
             runtime_s=float(weighted_runtime_s),
             max_memory_mb=float(weighted_memory_mb),
+            max_vram_mb=float(weighted_vram_mb) if weighted_vram_mb is not None else None,
             n_runs=total_runs,
             source_roots=";".join(source_roots),
             source_logs_count=sum(rec.source_logs_count for rec in records),
@@ -461,6 +798,13 @@ def add_combined_pred_fragment_modes(
 
             weighted_runtime_s = sum(rec.runtime_s * rec.n_runs for rec in records) / total_runs
             weighted_memory_mb = sum(rec.max_memory_mb * rec.n_runs for rec in records) / total_runs
+            vram_records = [rec for rec in records if rec.max_vram_mb is not None]
+            total_vram_runs = sum(rec.n_runs for rec in vram_records)
+            weighted_vram_mb = (
+                sum(float(rec.max_vram_mb) * rec.n_runs for rec in vram_records) / total_vram_runs
+                if total_vram_runs > 0
+                else None
+            )
             source_roots = sorted(
                 {
                     root
@@ -475,6 +819,7 @@ def add_combined_pred_fragment_modes(
                 mode=target_mode,
                 runtime_s=float(weighted_runtime_s),
                 max_memory_mb=float(weighted_memory_mb),
+                max_vram_mb=float(weighted_vram_mb) if weighted_vram_mb is not None else None,
                 n_runs=total_runs,
                 source_roots=";".join(source_roots),
                 source_logs_count=sum(rec.source_logs_count for rec in records),
@@ -493,9 +838,16 @@ def write_summary_tsv(rows: list[dict[str, str]], out_path: Path) -> None:
         "transcripts",
         "runtime_min",
         "max_ram_gb",
+        "max_vram_gb",
+        "vram_worked_max_gb",
+        "vram_failed_max_gb",
+        "vram_estimate_gb",
+        "plot_memory_gb",
+        "memory_metric",
         "n_runs",
         "source_logs_count",
         "aggregate_statistic",
+        "runtime_statistic",
         "transcript_source",
         "source_roots",
     ]
@@ -520,8 +872,8 @@ def _configure_plot_style() -> tuple[str, str]:
             "legend.fontsize": 10,
         }
     )
-    bg_color = "#f2f2f2"
-    grid_color = "#d4d4d4"
+    bg_color = "#ffffff"
+    grid_color = "#d9d9d9"
     return bg_color, grid_color
 
 
@@ -563,12 +915,14 @@ def _style_axes(ax: plt.Axes, grid_color: str, *, log_scale: bool = True) -> Non
     if log_scale:
         ax.set_xscale("log")
         ax.set_yscale("log")
-        ax.grid(True, which="major", axis="both", color=grid_color, linewidth=0.9, alpha=0.9)
+        # Keep horizontal guides only; vertical guides come from dataset lines.
+        ax.grid(True, which="major", axis="y", color=grid_color, linewidth=0.9, alpha=0.9)
         ax.grid(True, which="minor", axis="y", color=grid_color, linewidth=0.5, alpha=0.5)
     else:
         ax.set_xscale("linear")
         ax.set_yscale("linear")
-        ax.grid(True, which="major", axis="both", color=grid_color, linewidth=0.9, alpha=0.85)
+        # Keep horizontal guides only; vertical guides come from dataset lines.
+        ax.grid(True, which="major", axis="y", color=grid_color, linewidth=0.9, alpha=0.85)
         ax.grid(False, which="minor", axis="both")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -672,7 +1026,13 @@ def _set_data_driven_log_yticks(
     ax.yaxis.set_minor_locator(mticker.NullLocator())
 
 
-def _set_data_driven_log_xticks(ax: plt.Axes, x_values: list[float]) -> None:
+def _set_data_driven_log_xticks(
+    ax: plt.Axes,
+    x_values: list[float],
+    *,
+    max_ticks: int = 5,
+    min_sep_log10: float = 0.20,
+) -> None:
     clean = sorted(value for value in x_values if value > 0)
     if not clean:
         return
@@ -683,7 +1043,36 @@ def _set_data_driven_log_xticks(ax: plt.Axes, x_values: list[float]) -> None:
         return
 
     ax.set_xlim(x_min, x_max)
-    ax.xaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0), numticks=7))
+    locator = mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0), numticks=12)
+    candidates = sorted(
+        {
+            tick
+            for tick in locator.tick_values(x_min, x_max)
+            if x_min <= tick <= x_max
+        }
+    )
+    if not candidates:
+        return
+
+    # Keep readable spacing between labels, especially on the left side where
+    # the range is densest.
+    major_ticks = [candidates[0]]
+    for tick in candidates[1:]:
+        if math.log10(tick) - math.log10(major_ticks[-1]) >= min_sep_log10:
+            major_ticks.append(tick)
+    if major_ticks[-1] != candidates[-1]:
+        major_ticks.append(candidates[-1])
+
+    if len(major_ticks) > max_ticks:
+        keep_indices = {0, len(major_ticks) - 1}
+        slots = max_ticks - 2
+        if slots > 0:
+            for idx in range(1, slots + 1):
+                src = int(round(idx * (len(major_ticks) - 1) / (slots + 1)))
+                keep_indices.add(src)
+        major_ticks = [major_ticks[idx] for idx in sorted(keep_indices)]
+
+    ax.xaxis.set_major_locator(mticker.FixedLocator(major_ticks))
     ax.xaxis.set_major_formatter(
         mticker.FuncFormatter(lambda value, _: f"{_format_value_compact(value / 1e6)}M")
     )
@@ -705,7 +1094,9 @@ def _set_linear_xticks(ax: plt.Axes, x_min: float, x_max: float) -> None:
         ticks = [x_min + (step * idx) for idx in range(5)]
 
     ax.xaxis.set_major_locator(mticker.FixedLocator(ticks))
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda value, _: f"{value / 1e6:.0f}M"))
+    ax.xaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda value, _: f"{_format_value_compact(value / 1e6)}M")
+    )
     ax.xaxis.set_minor_locator(mticker.NullLocator())
 
 
@@ -881,8 +1272,8 @@ def _add_dataset_icons(
     icon_paths: dict[str, Path],
     *,
     y: float = 1.06,
-    icon_zoom: float = 0.028,
-    y_jitter: float = 0.024,
+    icon_zoom: float = 0.023,
+    y_jitter: float = 0.04,
 ) -> None:
     if not transcript_values:
         return
@@ -890,20 +1281,71 @@ def _add_dataset_icons(
     x_lo, x_hi = ax.get_xlim()
     x_left = min(x_lo, x_hi)
     x_right = max(x_lo, x_hi)
-    if ax.get_xscale() == "log":
-        x_jittered = _jitter_positions_log_space(transcript_values, min_sep_log10=0.065)
-    else:
-        x_jittered = {
-            tx: x_left + (idx + 1) * (x_right - x_left) / (len(transcript_values) + 1)
-            for idx, tx in enumerate(sorted(transcript_values))
-        }
+    is_log_x = ax.get_xscale() == "log"
     image_cache: dict[tuple[Path, str], np.ndarray] = {}
     connector_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+    placements: list[tuple[float, str, float]] = []
+    if is_log_x:
+        log_left = math.log10(max(x_left, 1e-12))
+        log_right = math.log10(max(x_right, 1e-12))
+        log_span = max(log_right - log_left, 1e-12)
+    else:
+        x_span = max(x_right - x_left, 1e-12)
 
-    for idx, tx in enumerate(transcript_values):
+    for tx in transcript_values:
         dataset = transcript_to_dataset.get(tx)
         if dataset is None:
             continue
+        if is_log_x:
+            x_frac = (math.log10(max(tx, 1e-12)) - log_left) / log_span
+        else:
+            x_frac = (tx - x_left) / x_span
+        placements.append((tx, dataset, x_frac))
+
+    placements.sort(key=lambda item: item[2])
+    if not placements:
+        return
+
+    # Keep all icons at one height and spread only horizontally.
+    # Use moderate adaptive spacing so icons stay close to their true transcript
+    # lines while still being readable.
+    n_icons = len(placements)
+    if n_icons >= 10:
+        desired_sep_frac = 0.054
+    elif n_icons >= 8:
+        desired_sep_frac = 0.060
+    elif n_icons >= 6:
+        desired_sep_frac = 0.068
+    else:
+        desired_sep_frac = 0.075
+    left_bound = 0.01
+    right_bound = 0.99
+    if n_icons > 1:
+        max_feasible_sep = (right_bound - left_bound) / float(n_icons - 1)
+        min_sep_frac = min(desired_sep_frac, max_feasible_sep * 0.92)
+    else:
+        min_sep_frac = desired_sep_frac
+    base_fracs = [item[2] for item in placements]
+    adj_fracs = list(base_fracs)
+
+    for idx in range(1, len(adj_fracs)):
+        adj_fracs[idx] = max(adj_fracs[idx], adj_fracs[idx - 1] + min_sep_frac)
+    if adj_fracs[-1] > right_bound:
+        shift = adj_fracs[-1] - right_bound
+        adj_fracs = [value - shift for value in adj_fracs]
+    if adj_fracs[0] < left_bound:
+        shift = left_bound - adj_fracs[0]
+        adj_fracs = [value + shift for value in adj_fracs]
+    for idx in range(len(adj_fracs) - 2, -1, -1):
+        adj_fracs[idx] = min(adj_fracs[idx], adj_fracs[idx + 1] - min_sep_frac)
+    if adj_fracs[0] < left_bound:
+        shift = left_bound - adj_fracs[0]
+        adj_fracs = [value + shift for value in adj_fracs]
+    if adj_fracs[-1] > right_bound:
+        shift = adj_fracs[-1] - right_bound
+        adj_fracs = [value - shift for value in adj_fracs]
+
+    for idx, (tx, dataset, x_frac) in enumerate(placements):
         icon_path = icon_paths.get(dataset)
         if icon_path is None:
             continue
@@ -915,26 +1357,28 @@ def _add_dataset_icons(
                 continue
             image_cache[cache_key] = _tint_icon_image(image, tint_hex)
         image = image_cache[cache_key]
-        x_val = x_jittered.get(tx, tx)
-        y_val = y + ((idx % 4) * y_jitter)
-        if ax.get_xscale() == "log":
-            jitter_mag = abs(math.log10(max(x_val, 1.0)) - math.log10(max(tx, 1.0)))
-            needs_connector = jitter_mag >= 0.006
+
+        adj_frac = adj_fracs[idx]
+        if is_log_x:
+            x_val = 10 ** (log_left + (adj_frac * log_span))
         else:
-            jitter_mag = abs(x_val - tx) / max(x_right - x_left, 1.0)
-            needs_connector = jitter_mag >= 0.008
-        if needs_connector:
-            ax.plot(
-                [tx, x_val],
-                [1.0, y_val - 0.004],
-                color=tint_hex,
-                linewidth=0.9,
-                linestyle=(0, (2, 2)),
-                alpha=0.7,
-                zorder=6,
-                transform=connector_transform,
-                clip_on=False,
-            )
+            x_val = x_left + (adj_frac * x_span)
+        y_val = y
+
+        # Always draw a connector so each icon is clearly linked to its
+        # transcript guide line at the top edge.
+        ax.plot(
+            [tx, x_val],
+            [1.0, y_val - 0.008],
+            color="#111111",
+            linewidth=1.05,
+            linestyle=(0, (1.5, 2.2)),
+            alpha=0.90,
+            zorder=6,
+            transform=connector_transform,
+            clip_on=False,
+        )
+
         zoom = icon_zoom * DATASET_ICON_ZOOM_SCALE.get(dataset, 1.0)
         icon = OffsetImage(image, zoom=zoom)
         ab = AnnotationBbox(
@@ -957,6 +1401,8 @@ def build_plot(
     title: str,
     *,
     mode_view: str,
+    memory_axis_label: str,
+    memory_value_key: str,
 ) -> None:
     bg_color, grid_color = _configure_plot_style()
     rows_by_mode: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -980,7 +1426,7 @@ def build_plot(
         }
         group_titles = {
             0: "End-to-End Segmentation",
-            1: "Prediction",
+            1: "Prediction Only",
         }
 
         mode_handle_map: dict[str, Line2D] = {}
@@ -1023,9 +1469,9 @@ def build_plot(
                         transcript_values,
                         transcript_to_dataset,
                         dataset_icon_paths,
-                        y=1.03,
-                        icon_zoom=0.028,
-                        y_jitter=0.024,
+                        y=1.04,
+                        icon_zoom=0.023,
+                        y_jitter=0.048,
                     )
 
                 for mode in group_to_modes[col_idx]:
@@ -1034,7 +1480,7 @@ def build_plot(
                     mode_rows = sorted(rows_by_mode[mode], key=lambda row: float(row["transcripts"]))
                     x_vals = [float(row["transcripts"]) for row in mode_rows]
                     y_vals = [
-                        float(row["runtime_min"]) if row_idx == 0 else float(row["max_ram_gb"])
+                        float(row["runtime_min"]) if row_idx == 0 else float(row[memory_value_key])
                         for row in mode_rows
                     ]
                     axis_y_values[(row_idx, col_idx)].extend(y_vals)
@@ -1078,7 +1524,7 @@ def build_plot(
                 )
 
         axes[0][0].set_ylabel("Runtime (min.)")
-        axes[1][0].set_ylabel("Max. RAM (GB)")
+        axes[1][0].set_ylabel(memory_axis_label)
         axes[1][0].set_xlabel("No. Transcripts")
         axes[1][1].set_xlabel("No. Transcripts")
         for ax in axes.flat:
@@ -1128,7 +1574,7 @@ def build_plot(
             mode_rows = sorted(rows_by_mode[mode], key=lambda row: float(row["transcripts"]))
             x_vals = [float(row["transcripts"]) for row in mode_rows]
             runtime_vals = [float(row["runtime_min"]) for row in mode_rows]
-            memory_vals = [float(row["max_ram_gb"]) for row in mode_rows]
+            memory_vals = [float(row[memory_value_key]) for row in mode_rows]
 
             color = MODE_COLORS.get(mode, "#555555")
             marker = MODE_MARKERS.get(mode, "o")
@@ -1184,7 +1630,7 @@ def build_plot(
                 )
 
         axes[0].set_ylabel("Runtime (min.)")
-        axes[1].set_ylabel("Max. RAM (GB)")
+        axes[1].set_ylabel(memory_axis_label)
         axes[0].set_xlabel("No. Transcripts")
         axes[1].set_xlabel("No. Transcripts")
         fig.suptitle(title, fontsize=15, y=0.985, weight="bold")
@@ -1261,6 +1707,10 @@ def build_rows(
     dataset_transcripts: dict[str, float],
     transcript_source_map: dict[str, str],
     aggregate_statistic: str,
+    runtime_statistic: str,
+    memory_metric: str,
+    vram_estimates: dict[tuple[str, str], VramEstimate],
+    status_snapshot_vram_mb: dict[tuple[str, str], float],
 ) -> list[dict[str, str]]:
     mode_rank = {mode: idx for idx, mode in enumerate(MODE_ORDER)}
     rows: list[dict[str, str]] = []
@@ -1268,6 +1718,44 @@ def build_rows(
         transcripts = dataset_transcripts.get(dataset)
         if transcripts is None:
             continue
+
+        max_ram_gb = record.max_memory_mb / 1024.0
+        record_vram_gb = (record.max_vram_mb / 1024.0) if record.max_vram_mb is not None else None
+        status_vram_mb = status_snapshot_vram_mb.get((dataset, mode))
+        status_vram_gb = (status_vram_mb / 1024.0) if status_vram_mb is not None and status_vram_mb > 0 else None
+        # Match dashboard semantics: prefer status-snapshot resource values first.
+        max_vram_gb = status_vram_gb if status_vram_gb is not None else record_vram_gb
+        vram_estimate = vram_estimates.get((dataset, mode))
+        vram_worked_max_gb = (
+            (vram_estimate.worked_max_mb / 1024.0)
+            if vram_estimate is not None and vram_estimate.worked_max_mb is not None
+            else None
+        )
+        vram_failed_max_gb = (
+            (vram_estimate.failed_max_mb / 1024.0)
+            if vram_estimate is not None and vram_estimate.failed_max_mb is not None
+            else None
+        )
+        vram_estimate_gb = (
+            (vram_estimate.estimate_mb / 1024.0)
+            if vram_estimate is not None and vram_estimate.estimate_mb is not None
+            else None
+        )
+
+        if memory_metric == "vram":
+            # Use measured max_vram when available.
+            if max_vram_gb is not None:
+                plot_memory_gb = max_vram_gb
+            # Otherwise use worked/failed estimator:
+            # max_vram_estimate = mean(max_worked_vram, max_failed_vram)
+            # with fallback to available side when one side is missing.
+            elif vram_estimate_gb is not None:
+                plot_memory_gb = vram_estimate_gb
+            else:
+                continue
+        else:
+            plot_memory_gb = max_ram_gb
+
         rows.append(
             {
                 "dataset": dataset,
@@ -1276,10 +1764,17 @@ def build_rows(
                 "mode_label": MODE_LABELS.get(mode, mode),
                 "transcripts": f"{transcripts:.0f}",
                 "runtime_min": f"{record.runtime_s / 60.0:.4f}",
-                "max_ram_gb": f"{record.max_memory_mb / 1024.0:.4f}",
+                "max_ram_gb": f"{max_ram_gb:.4f}",
+                "max_vram_gb": f"{max_vram_gb:.4f}" if max_vram_gb is not None else "",
+                "vram_worked_max_gb": f"{vram_worked_max_gb:.4f}" if vram_worked_max_gb is not None else "",
+                "vram_failed_max_gb": f"{vram_failed_max_gb:.4f}" if vram_failed_max_gb is not None else "",
+                "vram_estimate_gb": f"{vram_estimate_gb:.4f}" if vram_estimate_gb is not None else "",
+                "plot_memory_gb": f"{plot_memory_gb:.4f}",
+                "memory_metric": memory_metric,
                 "n_runs": str(record.n_runs),
                 "source_logs_count": str(record.source_logs_count),
                 "aggregate_statistic": aggregate_statistic,
+                "runtime_statistic": runtime_statistic,
                 "transcript_source": transcript_source_map.get(dataset, "unknown"),
                 "source_roots": record.source_roots,
             }
@@ -1334,6 +1829,36 @@ def parse_args() -> argparse.Namespace:
         help="Statistic for aggregating runtime/memory across successful runs.",
     )
     parser.add_argument(
+        "--runtime-statistic",
+        choices=["mean", "median", "min", "latest"],
+        default=None,
+        help=(
+            "Optional runtime-only aggregation across successful runs. "
+            "If omitted, uses --aggregate-statistic."
+        ),
+    )
+    parser.add_argument(
+        "--memory-metric",
+        choices=["ram", "vram"],
+        default="ram",
+        help=(
+            "Memory metric for plotting/summary: "
+            "'ram' uses LSF Max Memory (host RAM), "
+            "'vram' uses measured GPU VRAM when available "
+            "(OOM in-use VRAM and runtime snapshots/status snapshots)."
+        ),
+    )
+    parser.add_argument(
+        "--vram-fallback",
+        choices=["none", "gmem"],
+        default="none",
+        help=(
+            "Fallback for missing VRAM measurements. "
+            "'none' keeps only measured VRAM; "
+            "'gmem' falls back to requested queue reservation."
+        ),
+    )
+    parser.add_argument(
         "--title",
         type=str,
         default="Compute Resources",
@@ -1374,6 +1899,16 @@ def parse_args() -> argparse.Namespace:
             "'core_pred_2x2' shows baseline/use3d/alignment and pred frag off/on in a 2x2 layout."
         ),
     )
+    parser.add_argument(
+        "--status-snapshot-tsv",
+        nargs="*",
+        type=Path,
+        default=None,
+        help=(
+            "Optional status snapshot TSV(s) with measured max_vram fields. "
+            "Defaults to auto-discovered <root>/summaries/aggregate_status_snapshot.tsv."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1385,6 +1920,12 @@ def main() -> int:
     roots = [root.resolve() for root in roots if root.exists()]
     if not roots:
         raise SystemExit("No benchmark roots found. Pass explicit paths via --roots.")
+
+    status_snapshot_paths = discover_status_snapshot_paths(roots, args.status_snapshot_tsv)
+    status_snapshot_vram_mb = load_status_snapshot_vram_mb(
+        status_snapshot_paths,
+        fallback_to_requested_gmem=(args.vram_fallback == "gmem"),
+    )
 
     overview_path = None if args.transcript_source == "fallback" else discover_segbench_overview_path(project_root)
     segbench_counts: dict[str, float] = {}
@@ -1415,13 +1956,21 @@ def main() -> int:
         }
 
     datasets = set(dataset_transcripts.keys())
-    all_records = collect_records(roots, datasets=datasets)
+    all_records = collect_records(
+        roots,
+        datasets=datasets,
+        vram_fallback=args.vram_fallback,
+    )
     if not all_records:
         raise SystemExit("No parseable LSF records found.")
 
+    need_align_combined = args.include_align_combined or args.mode_view == "core_pred_2x2"
+    records_for_aggregation = all_records
+
     aggregated_records = aggregate_records(
-        all_records,
+        records_for_aggregation,
         statistic=args.aggregate_statistic,
+        runtime_statistic=args.runtime_statistic,
         include_incomplete=args.include_incomplete,
     )
     if not aggregated_records:
@@ -1429,6 +1978,17 @@ def main() -> int:
             "No successful records after filtering. "
             "Re-run with --include-incomplete if you want failed/incomplete blocks included."
         )
+
+    if need_align_combined:
+        aggregated_records = add_combined_alignment_mode(aggregated_records)
+    if args.mode_view == "core_pred_2x2":
+        aggregated_records = add_combined_pred_fragment_modes(aggregated_records)
+
+    status_snapshot_vram_mb = add_combined_status_snapshot_vram_mb(
+        status_snapshot_vram_mb,
+        include_align=need_align_combined,
+        include_pred=args.mode_view == "core_pred_2x2",
+    )
 
     mode_whitelist = set(MODE_ORDER)
     aggregated_records = {
@@ -1439,11 +1999,7 @@ def main() -> int:
     if not aggregated_records:
         raise SystemExit("No benchmark mode rows left after filtering export/non-mode logs.")
 
-    need_align_combined = args.include_align_combined or args.mode_view == "core_pred_2x2"
-    if need_align_combined:
-        aggregated_records = add_combined_alignment_mode(aggregated_records)
     if args.mode_view == "core_pred_2x2":
-        aggregated_records = add_combined_pred_fragment_modes(aggregated_records)
         core_pred_modes = {
             "baseline",
             "use3d_true",
@@ -1457,11 +2013,19 @@ def main() -> int:
         if not aggregated_records:
             raise SystemExit("No rows left after applying core_pred_2x2 mode filter.")
 
+    vram_estimates = estimate_vram_from_worked_failed(records_for_aggregation)
+    memory_axis_label = "Max. VRAM (GB)" if args.memory_metric == "vram" else "Max. RAM (GB)"
+    memory_value_key = "plot_memory_gb"
+
     rows = build_rows(
         aggregated_records,
         dataset_transcripts=dataset_transcripts,
         transcript_source_map=transcript_source_map,
         aggregate_statistic=args.aggregate_statistic,
+        runtime_statistic=(args.runtime_statistic or args.aggregate_statistic),
+        memory_metric=args.memory_metric,
+        vram_estimates=vram_estimates,
+        status_snapshot_vram_mb=status_snapshot_vram_mb,
     )
     if not rows:
         raise SystemExit("No rows to plot after dataset/mode filtering.")
@@ -1490,6 +2054,8 @@ def main() -> int:
         out_pdf=out_pdf,
         title=args.title,
         mode_view=args.mode_view,
+        memory_axis_label=memory_axis_label,
+        memory_value_key=memory_value_key,
     )
 
     datasets_in_rows = sorted({row["dataset"] for row in rows})
@@ -1510,8 +2076,15 @@ def main() -> int:
     print(f"Runs included after success filter: {total_aggregated_runs}")
     print(f"Rows written: {len(rows)}")
     print(f"Aggregate statistic: {args.aggregate_statistic}")
+    print(f"Runtime statistic: {args.runtime_statistic or args.aggregate_statistic}")
+    print(f"Memory metric: {args.memory_metric}")
+    print(f"VRAM fallback mode: {args.vram_fallback}")
     print(f"Mode view: {args.mode_view}")
     print(f"Transcript source mode: {args.transcript_source}")
+    print(f"Status snapshot TSVs used: {len(status_snapshot_paths)}")
+    print(f"Status snapshot VRAM overrides: {len(status_snapshot_vram_mb)}")
+    for status_path in status_snapshot_paths:
+        print(f"  - status: {status_path}")
     if excluded_datasets:
         print(f"Excluded datasets: {', '.join(sorted(excluded_datasets))}")
     if overview_path is not None:

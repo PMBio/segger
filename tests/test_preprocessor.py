@@ -112,6 +112,52 @@ def test_merscope_preprocessor_supports_entityid_assignments(tmp_path: Path) -> 
     assert set(bd[std_bd.id].astype(str).unique()) == {"101", "202"}
 
 
+def test_merscope_preprocessor_handles_coordinate_alias_collisions(tmp_path: Path) -> None:
+    preprocessor = _load_preprocessor_module()
+
+    tx_file = tmp_path / "detected_transcripts.csv"
+    tx_file.write_text(
+        (
+            "global_x,global_y,x,y,gene,EntityID,score\n"
+            "0.0,1.0,100.0,101.0,A,101,0.9\n"
+            "2.0,3.0,200.0,201.0,B,202,0.8\n"
+        ),
+        encoding="utf-8",
+    )
+
+    pp = preprocessor.get_preprocessor(tmp_path)
+    assert isinstance(pp, preprocessor.MerscopePreprocessor)
+
+    tx = pp.transcripts
+    std_tx = preprocessor.StandardTranscriptFields()
+    assert tx[std_tx.x].to_list() == [0.0, 2.0]
+    assert tx[std_tx.y].to_list() == [1.0, 3.0]
+    assert set(tx[std_tx.cell_id].drop_nulls().to_list()) == {"101", "202"}
+
+
+def test_merscope_preprocessor_handles_duplicate_csv_headers(tmp_path: Path) -> None:
+    preprocessor = _load_preprocessor_module()
+
+    tx_file = tmp_path / "detected_transcripts.csv"
+    tx_file.write_text(
+        (
+            "x,y,gene,EntityID,score,x\n"
+            "0.0,1.0,A,101,0.9,100.0\n"
+            "2.0,3.0,B,202,0.8,200.0\n"
+        ),
+        encoding="utf-8",
+    )
+
+    pp = preprocessor.get_preprocessor(tmp_path)
+    assert isinstance(pp, preprocessor.MerscopePreprocessor)
+
+    tx = pp.transcripts
+    std_tx = preprocessor.StandardTranscriptFields()
+    assert tx[std_tx.x].to_list() == [0.0, 2.0]
+    assert tx[std_tx.y].to_list() == [1.0, 3.0]
+    assert set(tx[std_tx.cell_id].drop_nulls().to_list()) == {"101", "202"}
+
+
 def test_cosmx_preprocessor_supports_transcripts_parquet_schema(tmp_path: Path) -> None:
     preprocessor = _load_preprocessor_module()
     pl = pytest.importorskip("polars")

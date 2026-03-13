@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from anndata import AnnData
 from typing import Literal, Optional
 from pathlib import Path
+import csv
 import geopandas as gpd
 import polars as pl
 import pandas as pd
@@ -1162,6 +1163,31 @@ class MerscopePreprocessor(ISTPreprocessor):
     @staticmethod
     def _scan_transcripts_file(path: Path) -> pl.LazyFrame:
         if path.suffix.lower() == ".csv":
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                header = next(csv.reader(handle), [])
+
+            # Some MERSCOPE CSVs duplicate coordinate columns (e.g. `x`), which
+            # Polars rejects. Rename only the duplicates and preserve first copies.
+            seen: dict[str, int] = {}
+            normalized: list[str] = []
+            for idx, name in enumerate(header):
+                base = str(name)
+                if base == "":
+                    base = f"unnamed_{idx}"
+                dup_idx = seen.get(base, 0)
+                seen[base] = dup_idx + 1
+                normalized.append(base if dup_idx == 0 else f"{base}__dup{dup_idx}")
+
+            has_duplicate_names = len(set(header)) != len(header)
+            has_blank_names = any(str(name) == "" for name in header)
+            if has_duplicate_names or has_blank_names:
+                warnings.warn(
+                    f"MERSCOPE transcript CSV '{path.name}' has duplicate/blank column names; "
+                    "auto-renaming duplicate headers for robust parsing.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return pl.scan_csv(path, has_header=True, new_columns=normalized)
             return pl.scan_csv(path)
         if path.suffix.lower() == ".parquet":
             return pl.scan_parquet(path, parallel="row_groups")
