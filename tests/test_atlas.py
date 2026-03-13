@@ -14,7 +14,10 @@ from pathlib import Path
 from types import ModuleType
 from unittest import mock
 
+import numpy as np
+import pandas as pd
 import pytest
+from anndata import AnnData
 
 
 def _load_atlas_module() -> ModuleType:
@@ -151,6 +154,47 @@ class TestImmuneOnlyGuess:
     def test_non_immune_only(self):
         # Only non-immune keywords → not immune-only (no immune evidence)
         assert atlas._immune_only_guess(["Neuron", "Astrocyte"]) is False
+
+
+# ---------------------------------------------------------------------------
+# var_names normalization
+# ---------------------------------------------------------------------------
+
+class TestVarNamePromotion:
+    def test_promotes_feature_name_to_var_names(self):
+        adata = AnnData(
+            X=np.zeros((2, 4), dtype=np.float32),
+            obs=pd.DataFrame(index=["cell1", "cell2"]),
+            var=pd.DataFrame(
+                {"feature_name": ["G1", "G2", "", "G1"]},
+                index=["0", "1", "2", "3"],
+            ),
+        )
+
+        changed = atlas._set_var_names_from_feature_column(
+            adata,
+            feature_column="feature_name",
+        )
+
+        assert changed is True
+        assert list(adata.var_names) == ["G1", "G2", "2", "G1-1"]
+        assert adata.var_names.is_unique
+
+    def test_noop_when_feature_column_missing(self):
+        adata = AnnData(
+            X=np.zeros((1, 2), dtype=np.float32),
+            obs=pd.DataFrame(index=["cell1"]),
+            var=pd.DataFrame(index=["0", "1"]),
+        )
+        original = list(adata.var_names)
+
+        changed = atlas._set_var_names_from_feature_column(
+            adata,
+            feature_column="feature_name",
+        )
+
+        assert changed is False
+        assert list(adata.var_names) == original
 
 
 # ---------------------------------------------------------------------------

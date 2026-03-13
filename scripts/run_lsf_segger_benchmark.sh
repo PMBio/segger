@@ -12,6 +12,8 @@ Environment overrides:
                              or comma-separated dataset keys
   DRY_RUN                    1 to only render plans/scripts
   AUTO_SUBMIT                1 to submit all LSF jobs immediately
+  RUN_PRIMARY_JOBS           1 to submit segment/predict jobs (default: 1)
+  RUN_EXPORT_JOBS            1 to submit export jobs (default: 1)
   RUN_EXPORTS                Legacy toggle for both export types
   RUN_ANNDATA_EXPORT         1 to export AnnData outputs
   RUN_XENIUM_EXPORT          1 to export Xenium Explorer outputs
@@ -22,9 +24,16 @@ Environment overrides:
   ENABLE_ALIGNMENT_JOBS      1 to include align_* training jobs (default: 1)
   RESUME_IF_EXISTS           1 to skip jobs with complete outputs
   FORCE_RERUN_FRAGMENT_JOBS  1 to rerun fragment-mode jobs even when outputs exist
+  ONLY_RETRY_OOM_JOBS        1 to submit only unfinished jobs whose latest attempt
+                             failed due to GPU OOM / TERM_MEMLIMIT
   RESET_DATASET_ROOT         1 to remove each dataset output dir before planning/submission
   RUN_LABEL                  Optional run label embedded into LSF job names
   SEGMENT_WALL_TIME_DEFAULT  Default wall time for segment/predict jobs
+  PREDICT_FRAGMENT_GMEM_GB   Base gmem (GB) for fragment-mode predict jobs
+                             (default: 36)
+  MERSCOPE_MOUSE_LIVER_MIN_QV
+                             Optional min-qv override for merscope_mouse_liver
+                             (empty by default; e.g. 0.1 or 0.2)
   EXPORT_WALL_TIME_DEFAULT   Default wall time for export jobs
   SEGGER_BIN                 Segger executable (default: segger)
   CLUSTER_CODE_ROOT          Cluster checkout used inside LSF scripts
@@ -33,7 +42,7 @@ Environment overrides:
   MICROMAMBA_ROOT_PREFIX     Micromamba root prefix used inside LSF scripts
   SEGGER_ENV_PATH            Env path activated inside LSF scripts
   PRESERVE_PYTHONPATH        1 to keep inherited PYTHONPATH inside LSF jobs
-  ALIGNMENT_REFERENCE_MODE   One of: auto|path|tissue (default: path)
+  ALIGNMENT_REFERENCE_MODE   One of: auto|path (default: path)
   ALIGNMENT_SCRNA_CELLTYPE_COLUMN
                              Cell-type column in local scRNA refs (default: cell_type)
   LSF_EXEC_SHELL             Shell used by LSF to interpret the job script
@@ -49,12 +58,27 @@ Environment overrides:
   ALIGNMENT_GPU_QUEUE        Optional override queue only for align_* jobs
   GPU_QUEUE_MAX_GMEM         Max GPU memory (GB) for GPU_QUEUE_DEFAULT routing (default: 31)
   GPU_QUEUE_MAX_MEM_GB       Max RAM (GB) for GPU_QUEUE_DEFAULT routing (default: 384)
+  GPU_QUEUE_MAX_WALL_H       Max wall-time hours for GPU_QUEUE_DEFAULT routing (default: 24)
+  GPU_QUEUE_PRO_MAX_GMEM     Max GPU memory (GB) requested on GPU_QUEUE_PRO
+                             (default: 36; cluster doc warns against 40G+)
+  FORCE_GPU_PRO_DATASETS     CSV dataset keys always forced to GPU_QUEUE_PRO
+                             (default: empty)
+  REQUIRE_SUCCESS_STATUS_FOR_RESUME
+                             1 to only reuse outputs with segment_status in
+                             {segment_ok,predict_ok} (default: 1)
+  ALLOW_UNVERIFIED_PRIMARY_OUTPUTS
+                             1 to trust existing seg outputs when status files
+                             are missing (default: 0)
   GPU_FALLBACK_ON_RETRY      1 to bump queue/VRAM on GPU-like failures in prior attempt
   GPU_FALLBACK_QUEUE         Queue used for retry fallback (default: GPU_QUEUE_PRO)
-  GPU_FALLBACK_MIN_GMEM      Minimum gmem (GB) after retry fallback (default: 36)
-  GPU_FALLBACK_FRAGMENT_GMEM Minimum gmem (GB) for fragment-mode retry fallback (default: 39)
+  GPU_RETRY_GMEM_BUMP_GB     gmem bump (GB) added on retry fallback (default: 20)
+  GPU_FALLBACK_MIN_GMEM      Minimum gmem (GB) after retry fallback/bump (default: 36)
+  GPU_FALLBACK_FRAGMENT_GMEM Minimum gmem (GB) for fragment-mode retry fallback/bump
+                             (default: GPU_QUEUE_PRO_MAX_GMEM)
   GPU_FALLBACK_MIN_MEM_GB    Minimum host RAM (GB) after retry fallback (default: 512)
   GPU_FALLBACK_MIN_WALL_H    Minimum wall-clock hours after retry fallback (default: 12)
+  GPU_USAGE_POLL_SEC         GPU-memory polling interval (seconds) for peak VRAM capture
+                             in primary jobs (default: 15)
   PEND_FALLBACK_MIN          Minutes before moving standard jobs to gpu queue
   MAX_ACTIVE_STANDARD        Reserved for future in-flight throttling
   MAX_ACTIVE_FRAGMENT        Reserved for future in-flight throttling
@@ -104,9 +128,9 @@ normalize_alignment_reference_mode() {
   local lower
   lower="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
   case "${lower}" in
-    auto|path|tissue) printf '%s' "${lower}" ;;
+    auto|path) printf '%s' "${lower}" ;;
     *)
-      echo "ERROR: ALIGNMENT_REFERENCE_MODE must be one of: auto, path, tissue (got: ${value})." >&2
+      echo "ERROR: ALIGNMENT_REFERENCE_MODE must be one of: auto, path (got: ${value})." >&2
       exit 1
       ;;
   esac
@@ -122,6 +146,12 @@ number_max() {
   local a="${1:-0}"
   local b="${2:-0}"
   awk -v a="${a}" -v b="${b}" 'BEGIN { if ((a + 0) >= (b + 0)) printf "%d", (a + 0); else printf "%d", (b + 0) }'
+}
+
+number_min() {
+  local a="${1:-0}"
+  local b="${2:-0}"
+  awk -v a="${a}" -v b="${b}" 'BEGIN { if ((a + 0) <= (b + 0)) printf "%d", (a + 0); else printf "%d", (b + 0) }'
 }
 
 wall_to_minutes() {
@@ -155,6 +185,51 @@ shell_join() {
     out+="${quoted}"
   done
   printf '%s' "${out}"
+}
+
+csv_contains() {
+  local csv="${1:-}"
+  local needle="${2:-}"
+  local item
+  local -a items=()
+
+  [[ -n "${needle}" ]] || return 1
+  [[ -n "${csv//[[:space:]]/}" ]] || return 1
+  IFS=',' read -r -a items <<< "${csv}"
+  for item in "${items[@]-}"; do
+    item="$(printf '%s' "${item}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ -n "${item}" ]] || continue
+    if [[ "${item}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+dataset_forces_gpu_pro() {
+  local dataset="${1:-}"
+  csv_contains "${FORCE_GPU_PRO_DATASETS}" "${dataset}"
+}
+
+read_stage_field() {
+  local stage_file="$1"
+  local field="$2"
+  if [[ ! -f "${stage_file}" ]]; then
+    printf '%s' ""
+    return 0
+  fi
+  awk -F'=' -v key="${field}" '$1 == key { print $2; exit }' "${stage_file}" 2>/dev/null || true
+}
+
+is_primary_success_status() {
+  case "${1:-}" in
+    segment_ok|predict_ok)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 all_dataset_keys() {
@@ -310,15 +385,9 @@ dataset_organism() {
 }
 
 alignment_reference_args() {
-  local tissue_type="$1"
-  local scrna_ref="$2"
-  local mode="$3"
-  local cache_args=""
+  local scrna_ref="$1"
+  local mode="$2"
   local ref_args=""
-
-  if [[ -n "${SCRNA_CACHE_DIR}" ]]; then
-    cache_args=" $(shell_join --reference-cache-dir "${SCRNA_CACHE_DIR}")"
-  fi
 
   case "${mode}" in
     path)
@@ -326,18 +395,9 @@ alignment_reference_args() {
         ref_args="$(shell_join --scrna-reference-path "${scrna_ref}" --scrna-celltype-column "${ALIGNMENT_SCRNA_CELLTYPE_COLUMN}")"
       fi
       ;;
-    tissue)
-      if [[ -n "${tissue_type}" ]]; then
-        ref_args="$(shell_join --tissue-type "${tissue_type}")${cache_args}"
-      elif [[ -n "${scrna_ref}" ]]; then
-        ref_args="$(shell_join --scrna-reference-path "${scrna_ref}" --scrna-celltype-column "${ALIGNMENT_SCRNA_CELLTYPE_COLUMN}")"
-      fi
-      ;;
     auto)
       if [[ -n "${scrna_ref}" && -f "${scrna_ref}" ]]; then
         ref_args="$(shell_join --scrna-reference-path "${scrna_ref}" --scrna-celltype-column "${ALIGNMENT_SCRNA_CELLTYPE_COLUMN}")"
-      elif [[ -n "${tissue_type}" ]]; then
-        ref_args="$(shell_join --tissue-type "${tissue_type}")${cache_args}"
       fi
       ;;
   esac
@@ -500,17 +560,26 @@ announce_job_event() {
 
 write_dataset_plan() {
   local dataset_root="$1"
+  local dataset="$2"
   local plan_file="${dataset_root}/job_plan.tsv"
   local line
+  local mode=""
+  local fragment_mode=""
+  local queue_name=""
+  local gmem=""
+  local mem_gb=""
+  local wall_time=""
 
-  printf "job\tgroup\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\n" > "${plan_file}"
+  printf "job\tgroup\tuse_3d\texpansion\ttx_max_k\ttx_max_dist\tn_mid_layers\tn_heads\tcells_min_counts\tmin_qv\talignment_loss\tmode\tfragment_mode\tqueue\tgmem_gb\tmem_gb\twall_time\n" > "${plan_file}"
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
     IFS='|' read -r \
-      job group _mode use_3d expansion txk txdist layers heads cellsmin minqv alignment _align_weight _pred_scale _fragment \
+      job group mode use_3d expansion txk txdist layers heads cellsmin minqv alignment _align_weight _pred_scale fragment_mode \
       <<< "${line}"
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    IFS=$'\t' read -r queue_name gmem mem_gb wall_time <<< "$(resolve_primary_resources "${dataset}" "${mode}" "${fragment_mode}" "${alignment}")"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
       "${job}" "${group}" "${use_3d}" "${expansion}" "${txk}" "${txdist}" "${layers}" "${heads}" "${cellsmin}" "${minqv}" "${alignment}" \
+      "${mode}" "${fragment_mode}" "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}" \
       >> "${plan_file}"
     : > "$(canonical_log_for_job "${dataset_root}" "${job}" "${group}")"
   done <<EOF
@@ -603,12 +672,25 @@ job_primary_output_exists() {
   local seg_dir="${dataset_root}/runs/${job}"
   local seg_file="${seg_dir}/segger_segmentation.parquet"
   local transcripts_file="${seg_dir}/transcripts.parquet"
-  local baseline_ckpt="${dataset_root}/runs/baseline/checkpoints/last.ckpt"
+  local segment_status_file="${seg_dir}/.segment_status"
+  local segment_status=""
 
-  if [[ -f "${seg_file}" || -f "${transcripts_file}" ]]; then
+  if [[ ! -s "${seg_file}" && ! -s "${transcripts_file}" ]]; then
+    return 1
+  fi
+
+  if [[ "${REQUIRE_SUCCESS_STATUS_FOR_RESUME}" != "1" ]]; then
     return 0
   fi
-  if [[ "${job}" == "baseline" && -f "${baseline_ckpt}" ]]; then
+
+  segment_status="$(read_stage_field "${segment_status_file}" "segment_status")"
+  if [[ -z "${segment_status}" ]]; then
+    if [[ "${ALLOW_UNVERIFIED_PRIMARY_OUTPUTS}" == "1" ]]; then
+      return 0
+    fi
+    return 1
+  fi
+  if is_primary_success_status "${segment_status}"; then
     return 0
   fi
   return 1
@@ -692,9 +774,18 @@ ensure_alignment_reference_ready() {
       fi
       ;;
     auto)
-      if [[ -n "${scrna_ref}" && ! -f "${scrna_ref}" ]]; then
-        printf "[%s] WARN dataset=%s local scRNA reference missing (%s); auto mode may fall back to --tissue-type=%s\n" \
-          "$(timestamp)" "${dataset}" "${scrna_ref}" "${tissue_type:-<none>}" >&2
+      if [[ -z "${scrna_ref}" ]]; then
+        echo "ERROR: dataset=${dataset} requires a local scRNA reference in ALIGNMENT_REFERENCE_MODE=auto, but none is configured." >&2
+        return 1
+      fi
+      if [[ ! -f "${scrna_ref}" ]]; then
+        if [[ "${DRY_RUN}" == "1" ]]; then
+          printf "[%s] PLAN dataset=%s local scRNA reference missing in auto mode (dry-run): %s\n" \
+            "$(timestamp)" "${dataset}" "${scrna_ref}" >&2
+          return 0
+        fi
+        echo "ERROR: dataset=${dataset} local scRNA reference not found: ${scrna_ref}" >&2
+        return 1
       fi
       ;;
   esac
@@ -744,7 +835,7 @@ refresh_scrna_reference_from_atlas() {
 }
 
 job_exports_requested() {
-  [[ "${RUN_ANNDATA_EXPORT}" == "1" || "${RUN_XENIUM_EXPORT}" == "1" ]]
+  [[ "${RUN_EXPORT_JOBS}" == "1" && ( "${RUN_ANNDATA_EXPORT}" == "1" || "${RUN_XENIUM_EXPORT}" == "1" ) ]]
 }
 
 xenium_export_supported_for_input() {
@@ -754,10 +845,10 @@ xenium_export_supported_for_input() {
 
 dataset_segment_mem_gb() {
   case "${1:-}" in
-    xenium_mouse_brain) printf '512' ;;
-    xenium_nsclc|xenium_mouse_liver|merscope_mouse_liver) printf '256' ;;
-    xenium_crc|xenium_v1_colon) printf '192' ;;
-    *) printf '128' ;;
+    xenium_mouse_brain) printf '384' ;;
+    xenium_nsclc|xenium_mouse_liver|merscope_mouse_liver) printf '192' ;;
+    xenium_crc|xenium_v1_colon) printf '128' ;;
+    *) printf '96' ;;
   esac
 }
 
@@ -781,13 +872,14 @@ dataset_predict_mem_gb() {
   local fragment="$2"
   if [[ "${fragment}" == "true" ]]; then
     case "${dataset}" in
-      xenium_mouse_brain) printf '512' ;;
+      xenium_mouse_brain|merscope_mouse_brain) printf '512' ;;
       *) printf '256' ;;
     esac
   else
     case "${dataset}" in
-      xenium_nsclc|xenium_mouse_liver|merscope_mouse_liver|xenium_crc|xenium_v1_colon) printf '192' ;;
-      *) printf '128' ;;
+      xenium_nsclc|xenium_mouse_liver|merscope_mouse_liver) printf '160' ;;
+      xenium_crc|xenium_v1_colon) printf '128' ;;
+      *) printf '96' ;;
     esac
   fi
 }
@@ -795,7 +887,7 @@ dataset_predict_mem_gb() {
 dataset_predict_gmem() {
   local fragment="$1"
   if [[ "${fragment}" == "true" ]]; then
-    printf '36'
+    printf '%s' "${PREDICT_FRAGMENT_GMEM_GB}"
   else
     printf '30'
   fi
@@ -819,6 +911,21 @@ dataset_predict_wall_time() {
   esac
 }
 
+clamp_gmem_for_queue() {
+  local queue_name="$1"
+  local gmem="$2"
+  local upper=""
+  if [[ "${queue_name}" == "${GPU_QUEUE_DEFAULT}" ]]; then
+    upper="${GPU_QUEUE_MAX_GMEM}"
+  elif [[ "${queue_name}" == "${GPU_QUEUE_PRO}" ]]; then
+    upper="${GPU_QUEUE_PRO_MAX_GMEM}"
+  fi
+  if [[ -n "${upper}" ]]; then
+    gmem="$(number_min "${gmem}" "${upper}")"
+  fi
+  printf '%s' "${gmem}"
+}
+
 dataset_tiling_margin_training() {
   case "${1:-}" in
     xenium_mouse_brain) printf '4' ;;
@@ -835,6 +942,32 @@ dataset_tiling_margin_prediction() {
   esac
 }
 
+dataset_segment_prediction_mode() {
+  case "${1:-}" in
+    # This MERSCOPE sample has no nucleus-assigned transcripts in recent runs.
+    # Request cell mode directly to avoid unnecessary nucleus-mode fallback.
+    merscope_mouse_liver) printf 'cell' ;;
+    *) printf 'nucleus' ;;
+  esac
+}
+
+dataset_effective_min_qv() {
+  local dataset="$1"
+  local default_min_qv="$2"
+  case "${dataset}" in
+    merscope_mouse_liver)
+      if [[ -n "${MERSCOPE_MOUSE_LIVER_MIN_QV}" ]]; then
+        printf '%s' "${MERSCOPE_MOUSE_LIVER_MIN_QV}"
+      else
+        printf '%s' "${default_min_qv}"
+      fi
+      ;;
+    *)
+      printf '%s' "${default_min_qv}"
+      ;;
+  esac
+}
+
 resolve_primary_resources() {
   local dataset="$1"
   local mode="$2"
@@ -844,6 +977,8 @@ resolve_primary_resources() {
   local gmem=""
   local mem_gb=""
   local wall_time=""
+  local wall_minutes=0
+  local max_wall_minutes=0
 
   if [[ "${mode}" == "segment" ]]; then
     gmem="$(dataset_segment_gmem "${dataset}")"
@@ -856,14 +991,25 @@ resolve_primary_resources() {
   fi
 
   if [[ "${ROUTE_ELIGIBLE_TO_GPU}" == "1" ]]; then
-    if number_le "${gmem}" "${GPU_QUEUE_MAX_GMEM}" && number_le "${mem_gb}" "${GPU_QUEUE_MAX_MEM_GB}"; then
+    wall_minutes="$(wall_to_minutes "${wall_time}")"
+    max_wall_minutes=$((GPU_QUEUE_MAX_WALL_H * 60))
+    if number_le "${gmem}" "${GPU_QUEUE_MAX_GMEM}" && \
+       number_le "${mem_gb}" "${GPU_QUEUE_MAX_MEM_GB}" && \
+       [[ "${wall_minutes}" -le "${max_wall_minutes}" ]]; then
       queue_name="${GPU_QUEUE_DEFAULT}"
     fi
+  fi
+
+  # Keep known unstable datasets on the pro queue without changing base gmem.
+  if dataset_forces_gpu_pro "${dataset}"; then
+    queue_name="${GPU_QUEUE_PRO}"
   fi
 
   if [[ -n "${ALIGNMENT_GPU_QUEUE}" && "${alignment}" == "true" ]]; then
     queue_name="${ALIGNMENT_GPU_QUEUE}"
   fi
+
+  gmem="$(clamp_gmem_for_queue "${queue_name}" "${gmem}")"
 
   printf "%s\t%s\t%s\t%s\n" "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}"
 }
@@ -954,6 +1100,8 @@ render_primary_attempt_script() {
   local activation_block=":"
   local tiling_margin_training=""
   local tiling_margin_prediction=""
+  local segment_prediction_mode=""
+  local effective_minqv=""
 
   success_status="$(primary_success_status "${mode}")"
   if [[ "${mode}" == "predict" ]]; then
@@ -964,12 +1112,14 @@ render_primary_attempt_script() {
   tiling_margin_prediction="$(dataset_tiling_margin_prediction "${dataset}")"
 
   if [[ "${mode}" == "segment" ]]; then
+    segment_prediction_mode="$(dataset_segment_prediction_mode "${dataset}")"
+    effective_minqv="$(dataset_effective_min_qv "${dataset}" "${minqv}")"
     segger_cmd_line="$(shell_join \
       "${SEGGER_BIN}" segment \
       "${input_dir}" \
       "${seg_dir}" \
       --n-epochs "${N_EPOCHS}" \
-      --prediction-mode nucleus \
+      --prediction-mode "${segment_prediction_mode}" \
       --prediction-scale-factor "${pred_scale}" \
       --use-3d "${use_3d}" \
       --transcripts-max-k "${txk}" \
@@ -979,9 +1129,9 @@ render_primary_attempt_script() {
       --n-mid-layers "${layers}" \
       --n-heads "${heads}" \
       --cells-min-counts "${cellsmin}" \
-      --min-qv "${minqv}")"
+      --min-qv "${effective_minqv}")"
     if [[ "${alignment}" == "true" ]]; then
-      align_ref_args="$(alignment_reference_args "${tissue_type}" "${scrna_ref}" "${ALIGNMENT_REFERENCE_MODE}")"
+      align_ref_args="$(alignment_reference_args "${scrna_ref}" "${ALIGNMENT_REFERENCE_MODE}")"
       segger_cmd_line+=" $(shell_join \
         --alignment-loss \
         --alignment-loss-weight-start 0.0 \
@@ -1036,10 +1186,63 @@ ${dependency_directive}
 
 set -euo pipefail
 
+GPU_USAGE_POLL_SEC=$(printf '%q' "${GPU_USAGE_POLL_SEC}")
+VRAM_TRACK_FILE=$(printf '%q' "${seg_dir}/.vram_peak_attempt${attempt}.txt")
+GPU_MONITOR_PID=""
+
+read_peak_vram_mb() {
+  local peak_mb="0"
+  if [[ -f "\${VRAM_TRACK_FILE}" ]]; then
+    peak_mb="\$(tr -cd '0-9' < "\${VRAM_TRACK_FILE}" | head -c 16)"
+  fi
+  [[ -n "\${peak_mb}" ]] || peak_mb="0"
+  printf '%s' "\${peak_mb}"
+}
+
+read_peak_vram_gb() {
+  local peak_mb
+  peak_mb="\$(read_peak_vram_mb)"
+  awk -v mb="\${peak_mb}" 'BEGIN { printf "%.2f", (mb + 0.0) / 1024.0 }'
+}
+
+update_peak_vram_once() {
+  local used current
+  used="\$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -cd '0-9' || true)"
+  [[ "\${used}" =~ ^[0-9]+$ ]] || return 0
+
+  current="\$(read_peak_vram_mb)"
+  [[ "\${current}" =~ ^[0-9]+$ ]] || current="0"
+  if (( used > current )); then
+    printf '%s\n' "\${used}" > "\${VRAM_TRACK_FILE}"
+  fi
+}
+
+start_peak_vram_monitor() {
+  (
+    while true; do
+      update_peak_vram_once || true
+      sleep "\${GPU_USAGE_POLL_SEC}" || break
+    done
+  ) &
+  GPU_MONITOR_PID="\$!"
+}
+
+stop_peak_vram_monitor() {
+  if [[ -n "\${GPU_MONITOR_PID}" ]]; then
+    kill "\${GPU_MONITOR_PID}" >/dev/null 2>&1 || true
+    wait "\${GPU_MONITOR_PID}" 2>/dev/null || true
+    GPU_MONITOR_PID=""
+  fi
+}
+
 write_segment_status() {
   local stage_status="\$1"
   local stage_rc="\${2:-0}"
-  printf 'segment_status=%s\nsegment_rc=%s\n' "\${stage_status}" "\${stage_rc}" > $(printf '%q' "${segment_status_file}")
+  local peak_mb peak_gb
+  peak_mb="\$(read_peak_vram_mb)"
+  peak_gb="\$(read_peak_vram_gb)"
+  printf 'segment_status=%s\nsegment_rc=%s\nmax_vram_mb=%s\nmax_vram_gb=%s\n' \
+    "\${stage_status}" "\${stage_rc}" "\${peak_mb}" "\${peak_gb}" > $(printf '%q' "${segment_status_file}")
 }
 
 classify_segment_status() {
@@ -1055,6 +1258,8 @@ on_primary_exit() {
   local rc=\$?
   local current_status=""
   trap - EXIT INT TERM HUP
+  stop_peak_vram_monitor
+  update_peak_vram_once || true
   if [[ -f $(printf '%q' "${segment_status_file}") ]]; then
     current_status="\$(awk -F'=' '\$1 == \"segment_status\" { print \$2; exit }' $(printf '%q' "${segment_status_file}") 2>/dev/null || true)"
   fi
@@ -1093,9 +1298,14 @@ fi
 nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits || true
 
 mkdir -p $(printf '%q' "${seg_dir}")
+printf '0\n' > "\${VRAM_TRACK_FILE}"
+update_peak_vram_once || true
+start_peak_vram_monitor
 write_segment_status "running" "0"
 $(printf '%s' "${segger_cmd_line}")
 segger_rc=\$?
+stop_peak_vram_monitor
+update_peak_vram_once || true
 echo "[JOB] segger_rc=\${segger_rc}"
 if [[ "\${segger_rc}" -ne 0 ]]; then
   write_segment_status "\$(classify_segment_status "\${segger_rc}")" "\${segger_rc}"
@@ -1285,11 +1495,13 @@ EOF
 status_note() {
   local queue_name="$1"
   local gmem="$2"
-  local attempt="$3"
-  local job_id="$4"
-  local suffix="${5:-}"
+  local mem_gb="$3"
+  local wall_time="$4"
+  local attempt="$5"
+  local job_id="$6"
+  local suffix="${7:-}"
   local note
-  note="queue=${queue_name} gmem=${gmem}G attempt=${attempt}"
+  note="queue=${queue_name} gmem=${gmem}G mem=${mem_gb}G wall=${wall_time} attempt=${attempt}"
   if [[ -n "${job_id}" ]]; then
     note+=" lsf_job=${job_id}"
   fi
@@ -1336,22 +1548,66 @@ detect_prior_gpu_failure() {
   local attempt="$3"
   local out_log="${dataset_root}/logs/${job}.attempt${attempt}.out"
   local err_log="${dataset_root}/logs/${job}.attempt${attempt}.err"
+  local summary_file summary_hit
 
   if [[ "${attempt}" -le 0 ]]; then
     printf 'none'
     return 0
   fi
 
-  if contains_pattern "${err_log}" 'cudaerrorillegaladdress|cuda_error_illegal_address|illegal memory access|cudadrivererror'; then
+  if contains_pattern "${out_log}" 'cudaerrorillegaladdress|cuda_error_illegal_address|illegal memory access|cudadrivererror' || \
+     contains_pattern "${err_log}" 'cudaerrorillegaladdress|cuda_error_illegal_address|illegal memory access|cudadrivererror'; then
     printf 'gpu_illegal_access'
     return 0
   fi
 
   if contains_pattern "${out_log}" 'term_memlimit|exited with exit code 137|exited with exit code 140' || \
-     contains_pattern "${err_log}" 'out of memory|cuda error: out of memory|cudaerrormemoryallocation|memoryerror: std::bad_alloc|killed[[:space:]]+segger|user defined signal 2'; then
+     contains_pattern "${err_log}" 'term_memlimit|exited with exit code 137|exited with exit code 140|out of memory|cuda error: out of memory|cudaerrormemoryallocation|memoryerror: std::bad_alloc|killed[[:space:]]+segger|user defined signal 2'; then
     printf 'gpu_oom_or_memlimit'
     return 0
   fi
+
+  # Fallback: when prior attempt logs were rotated/cleaned, recover the last
+  # known failure class from summary snapshots.
+  for summary_file in \
+    "${dataset_root}/summaries/status_snapshot.tsv" \
+    "${dataset_root}/summaries/all_jobs.tsv"; do
+    [[ -f "${summary_file}" ]] || continue
+    summary_hit="$(awk -F'\t' -v target_job="${job}" -v target_attempt="${attempt}" '
+      function field(name) {
+        if ((name in idx) && idx[name] > 0 && idx[name] <= NF) return $(idx[name])
+        return ""
+      }
+      NR == 1 {
+        for (i = 1; i <= NF; i++) idx[$i] = i
+        next
+      }
+      {
+        if (field("job") != target_job) next
+
+        run_count = field("run_count")
+        if (run_count ~ /^[0-9]+$/ && (run_count + 0) < (target_attempt + 0)) next
+
+        status = tolower(field("status"))
+        seg_status = tolower(field("segment_status"))
+        note = tolower(field("note"))
+
+        combined = status " " seg_status " " note
+        if (combined ~ /cudaerrorillegaladdress|cuda_error_illegal_address|illegal memory access|cudadrivererror/) {
+          print "gpu_illegal_access"
+          exit
+        }
+        if (combined ~ /term_memlimit|out of memory|cuda error: out of memory|cudaerrormemoryallocation|memoryerror: std::bad_alloc|exited with exit code 137|exited with exit code 140|segment_oom|oom/) {
+          print "gpu_oom_or_memlimit"
+          exit
+        }
+      }
+    ' "${summary_file}")"
+    if [[ "${summary_hit}" == "gpu_illegal_access" || "${summary_hit}" == "gpu_oom_or_memlimit" ]]; then
+      printf '%s' "${summary_hit}"
+      return 0
+    fi
+  done
 
   printf 'none'
 }
@@ -1366,9 +1622,12 @@ apply_retry_gpu_fallback() {
   local wall_time="$7"
   local reason="$8"
 
+  local prior_queue="${queue_name}"
+  local prior_gmem="${gmem}"
   local fallback_queue="${GPU_FALLBACK_QUEUE}"
   local fallback_gmem="${GPU_FALLBACK_MIN_GMEM}"
   local fallback_mem="${GPU_FALLBACK_MIN_MEM_GB}"
+  local bumped_gmem
   local fallback_wall_minutes
   local wall_minutes
 
@@ -1380,17 +1639,21 @@ apply_retry_gpu_fallback() {
     fallback_mem="$(number_max "${fallback_mem}" "512")"
   fi
 
+  bumped_gmem="$(awk -v current="${gmem}" -v bump="${GPU_RETRY_GMEM_BUMP_GB}" 'BEGIN { printf "%d", (current + 0) + (bump + 0) }')"
+
   queue_name="${fallback_queue}"
-  gmem="$(number_max "${gmem}" "${fallback_gmem}")"
+  gmem="$(number_max "${bumped_gmem}" "${fallback_gmem}")"
   mem_gb="$(number_max "${mem_gb}" "${fallback_mem}")"
+  gmem="$(clamp_gmem_for_queue "${queue_name}" "${gmem}")"
   wall_minutes="$(wall_to_minutes "${wall_time}")"
   fallback_wall_minutes=$((GPU_FALLBACK_MIN_WALL_H * 60))
   if [[ "${wall_minutes}" -lt "${fallback_wall_minutes}" ]]; then
     wall_time="$(minutes_to_wall "${fallback_wall_minutes}")"
   fi
 
-  printf "%s\t%s\t%s\t%s\tretry_fallback=%s\n" \
-    "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}" "${reason}"
+  printf "%s\t%s\t%s\t%s\tretry_fallback=%s queue_shift=%s->%s gmem_shift=%sG->%sG gmem_bump=+%sG\n" \
+    "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}" "${reason}" \
+    "${prior_queue}" "${queue_name}" "${prior_gmem}" "${gmem}" "${GPU_RETRY_GMEM_BUMP_GB}"
 }
 
 diagnostics_for_job() {
@@ -1510,27 +1773,21 @@ run_validation_for_root() {
     return 0
   fi
 
-  if [[ -n "${tissue_type}" ]]; then
-    bash "${SCRIPT_DIR}/build_benchmark_validation_table.sh" \
-      --root "${dataset_root}" \
-      --input-dir "${input_dir}" \
-      --tissue-type "${tissue_type}" \
-      --include-default-10x true \
-      >/dev/null
-  elif [[ -z "${scrna_ref}" ]]; then
-    bash "${SCRIPT_DIR}/build_benchmark_validation_table.sh" \
-      --root "${dataset_root}" \
-      --input-dir "${input_dir}" \
-      --include-default-10x true \
-      >/dev/null
-  else
-    bash "${SCRIPT_DIR}/build_benchmark_validation_table.sh" \
-      --root "${dataset_root}" \
-      --input-dir "${input_dir}" \
-      --scrna-reference-path "${scrna_ref}" \
-      --include-default-10x true \
-      >/dev/null
+  if [[ -z "${scrna_ref}" ]]; then
+    echo "ERROR: dataset_root=${dataset_root} missing SCRNA_REFERENCE_PATH; refusing tissue fallback for validation." >&2
+    return 1
   fi
+  if [[ ! -f "${scrna_ref}" ]]; then
+    echo "ERROR: dataset_root=${dataset_root} SCRNA_REFERENCE_PATH not found; refusing tissue fallback for validation: ${scrna_ref}" >&2
+    return 1
+  fi
+
+  bash "${SCRIPT_DIR}/build_benchmark_validation_table.sh" \
+    --root "${dataset_root}" \
+    --input-dir "${input_dir}" \
+    --scrna-reference-path "${scrna_ref}" \
+    --include-default-10x true \
+    >/dev/null
 }
 
 run_or_plan_job() {
@@ -1593,6 +1850,7 @@ run_or_plan_job() {
   local predict_dependency_list=""
   local primary_dependency_name=""
   local baseline_ckpt_path="${dataset_root}/runs/baseline/checkpoints/last.ckpt"
+  local allow_export_only="0"
 
   lane="$(job_lane "${group}")"
   summary_file="$(summary_file_for_group "${dataset_root}" "${group}")"
@@ -1622,6 +1880,37 @@ run_or_plan_job() {
 
   attempt="$(next_attempt_for_job "${dataset_root}" "${job}")"
   previous_attempt=$((attempt - 1))
+  if [[ "${ONLY_RETRY_OOM_JOBS}" == "1" ]]; then
+    if [[ "${segment_outputs_present}" == "1" ]]; then
+      note="filter_only_retry_oom segment_output_present"
+      upsert_status_row \
+        "${skipped_file}" "${job}" "${lane}" "skipped_filter" "0" "${note}" "${seg_dir}" "${log_file}" \
+        "skipped_filter" "skipped_filter" "" "" "only_retry_oom"
+      append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} status=skipped_filter reason=only_retry_oom segment_output_present"
+      rebuild_all_jobs_summary "${dataset_root}"
+      return 0
+    fi
+    if [[ "${previous_attempt}" -lt 1 ]]; then
+      note="filter_only_retry_oom no_prior_attempt"
+      upsert_status_row \
+        "${skipped_file}" "${job}" "${lane}" "skipped_filter" "0" "${note}" "${seg_dir}" "${log_file}" \
+        "skipped_filter" "skipped_filter" "" "" "only_retry_oom"
+      append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} status=skipped_filter reason=only_retry_oom no_prior_attempt"
+      rebuild_all_jobs_summary "${dataset_root}"
+      return 0
+    fi
+
+    prior_gpu_failure="$(detect_prior_gpu_failure "${dataset_root}" "${job}" "${previous_attempt}")"
+    if [[ "${prior_gpu_failure}" != "gpu_oom_or_memlimit" ]]; then
+      note="filter_only_retry_oom prior_failure=${prior_gpu_failure}"
+      upsert_status_row \
+        "${skipped_file}" "${job}" "${lane}" "skipped_filter" "0" "${note}" "${seg_dir}" "${log_file}" \
+        "skipped_filter" "skipped_filter" "" "" "only_retry_oom"
+      append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} status=skipped_filter reason=only_retry_oom prior_failure=${prior_gpu_failure}"
+      rebuild_all_jobs_summary "${dataset_root}"
+      return 0
+    fi
+  fi
   baseline_dep_name=""
   paired_predict_dep_name=""
   paired_predict_job=""
@@ -1646,9 +1935,11 @@ run_or_plan_job() {
   fi
 
   IFS=$'\t' read -r queue_name gmem mem_gb wall_time <<< "$(resolve_primary_resources "${dataset}" "${mode}" "${fragment}" "${alignment}")"
-  if [[ "${GPU_FALLBACK_ON_RETRY}" == "1" && "${previous_attempt}" -ge 1 ]]; then
+  if [[ "${previous_attempt}" -ge 1 && "${prior_gpu_failure}" == "none" ]]; then
     prior_gpu_failure="$(detect_prior_gpu_failure "${dataset_root}" "${job}" "${previous_attempt}")"
-    if [[ "${prior_gpu_failure}" != "none" ]]; then
+  fi
+  if [[ "${previous_attempt}" -ge 1 && "${prior_gpu_failure}" != "none" ]]; then
+    if [[ "${GPU_FALLBACK_ON_RETRY}" == "1" || "${ONLY_RETRY_OOM_JOBS}" == "1" ]]; then
       IFS=$'\t' read -r queue_name gmem mem_gb wall_time fallback_note <<< \
         "$(apply_retry_gpu_fallback "${dataset}" "${mode}" "${fragment}" "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}" "${prior_gpu_failure}")"
     fi
@@ -1667,8 +1958,15 @@ run_or_plan_job() {
     export_status="not_requested"
   fi
 
-  if [[ "${RESUME_IF_EXISTS}" == "1" && "${force_rerun_fragment_job}" != "1" ]] && [[ "${segment_outputs_present}" == "1" ]] && \
-     job_exports_requested && [[ "${export_outputs_ready}" != "1" ]]; then
+  if [[ "${segment_outputs_present}" == "1" ]] && job_exports_requested && [[ "${export_outputs_ready}" != "1" ]]; then
+    if [[ "${RESUME_IF_EXISTS}" == "1" && "${force_rerun_fragment_job}" != "1" ]]; then
+      allow_export_only="1"
+    fi
+    if [[ "${RUN_PRIMARY_JOBS}" != "1" ]]; then
+      allow_export_only="1"
+    fi
+  fi
+  if [[ "${allow_export_only}" == "1" ]]; then
     segment_status="skipped_existing"
     attempt_status="pending"
     note="export_only existing_segment=true attempt=${attempt}"
@@ -1724,6 +2022,17 @@ run_or_plan_job() {
     return 0
   fi
 
+  if [[ "${RUN_PRIMARY_JOBS}" != "1" ]]; then
+    note="primary_disabled_missing_segment attempt=${attempt}"
+    upsert_status_row \
+      "${skipped_file}" "${job}" "${lane}" "skipped_filter" "0" "${note}" "${seg_dir}" "${log_file}" \
+      "skipped_filter" "${export_status}" "" "" "primary_disabled"
+    append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} status=skipped_filter reason=primary_disabled_missing_segment"
+    rebuild_all_jobs_summary "${dataset_root}"
+    announce_job_event "SKIPPED" "${dataset}" "${job}" "${note}"
+    return 0
+  fi
+
   primary_attempt_script="$(render_primary_attempt_script \
     "${dataset_root}" "${dataset}" "${input_dir}" "${scrna_ref}" "${tissue_type}" \
     "${job}" "${group}" "${mode}" "${use_3d}" "${expansion}" "${txk}" "${txdist}" \
@@ -1736,9 +2045,9 @@ run_or_plan_job() {
       "${export_queue_name}" "${export_mem_gb}" "${export_wall_time}" "${primary_dependency_name}")"
   fi
 
-  note="$(status_note "${queue_name}" "${gmem}" "${attempt}" "" "")"
+  note="$(status_note "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}" "${attempt}" "" "")"
   if [[ "${mode}" == "predict" && -n "${predict_dependency_list}" ]]; then
-    note="$(status_note "${queue_name}" "${gmem}" "${attempt}" "" "depends_on=${predict_dependency_list}")"
+    note="$(status_note "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}" "${attempt}" "" "depends_on=${predict_dependency_list}")"
   fi
   if [[ -n "${fallback_note}" ]]; then
     note="${note} ${fallback_note}"
@@ -1826,7 +2135,7 @@ run_or_plan_job() {
     fi
     export_suffix+="export_lsf_job=${export_job_id}"
   fi
-  note="$(status_note "${queue_name}" "${gmem}" "${attempt}" "${segment_job_id}" "${export_suffix}")"
+  note="$(status_note "${queue_name}" "${gmem}" "${mem_gb}" "${wall_time}" "${attempt}" "${segment_job_id}" "${export_suffix}")"
 
   append_canonical_log "${dataset_root}" "${job}" "${group}" "START job=${job} submit_only enqueue_begin ${note}"
   append_canonical_log "${dataset_root}" "${job}" "${group}" "DONE job=${job} submit_only enqueue_complete lsf_state=${state:-unknown}"
@@ -1851,8 +2160,11 @@ DEFAULT_CLUSTER_CODE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/omics/groups/OE0606/internal/elihei/projects/segger_lsf_benchmark_fixed}"
 DATASET_KEYS="${DATASET_KEYS:-root_missing}"
+MERSCOPE_MOUSE_LIVER_MIN_QV="${MERSCOPE_MOUSE_LIVER_MIN_QV:-}"
 DRY_RUN="$(normalize_bool "${DRY_RUN:-1}")"
 AUTO_SUBMIT="$(normalize_bool "${AUTO_SUBMIT:-0}")"
+RUN_PRIMARY_JOBS="$(normalize_bool "${RUN_PRIMARY_JOBS:-1}")"
+RUN_EXPORT_JOBS="$(normalize_bool "${RUN_EXPORT_JOBS:-1}")"
 RUN_EXPORTS="$(normalize_bool "${RUN_EXPORTS:-1}")"
 RUN_ANNDATA_EXPORT="$(normalize_bool "${RUN_ANNDATA_EXPORT:-${RUN_EXPORTS}}")"
 RUN_XENIUM_EXPORT="$(normalize_bool "${RUN_XENIUM_EXPORT:-${RUN_EXPORTS}}")"
@@ -1862,6 +2174,7 @@ RUN_STATUS_SNAPSHOT="$(normalize_bool "${RUN_STATUS_SNAPSHOT:-1}")"
 ENABLE_ALIGNMENT_JOBS="$(normalize_bool "${ENABLE_ALIGNMENT_JOBS:-1}")"
 RESUME_IF_EXISTS="$(normalize_bool "${RESUME_IF_EXISTS:-1}")"
 FORCE_RERUN_FRAGMENT_JOBS="$(normalize_bool "${FORCE_RERUN_FRAGMENT_JOBS:-0}")"
+ONLY_RETRY_OOM_JOBS="$(normalize_bool "${ONLY_RETRY_OOM_JOBS:-0}")"
 RESET_DATASET_ROOT="$(normalize_bool "${RESET_DATASET_ROOT:-0}")"
 AUTO_FETCH_SCRNA_REFS="$(normalize_bool "${AUTO_FETCH_SCRNA_REFS:-1}")"
 FORCE_SCRNA_REFETCH="$(normalize_bool "${FORCE_SCRNA_REFETCH:-0}")"
@@ -1876,17 +2189,41 @@ EXPORT_QUEUE="${EXPORT_QUEUE:-long}"
 ALIGNMENT_GPU_QUEUE="${ALIGNMENT_GPU_QUEUE:-}"
 GPU_QUEUE_MAX_GMEM="${GPU_QUEUE_MAX_GMEM:-31}"
 GPU_QUEUE_MAX_MEM_GB="${GPU_QUEUE_MAX_MEM_GB:-384}"
+GPU_QUEUE_MAX_WALL_H="${GPU_QUEUE_MAX_WALL_H:-24}"
+GPU_QUEUE_PRO_MAX_GMEM="${GPU_QUEUE_PRO_MAX_GMEM:-36}"
+FORCE_GPU_PRO_DATASETS="${FORCE_GPU_PRO_DATASETS:-}"
+REQUIRE_SUCCESS_STATUS_FOR_RESUME="$(normalize_bool "${REQUIRE_SUCCESS_STATUS_FOR_RESUME:-1}")"
+ALLOW_UNVERIFIED_PRIMARY_OUTPUTS="$(normalize_bool "${ALLOW_UNVERIFIED_PRIMARY_OUTPUTS:-0}")"
 GPU_FALLBACK_ON_RETRY="$(normalize_bool "${GPU_FALLBACK_ON_RETRY:-1}")"
 GPU_FALLBACK_QUEUE="${GPU_FALLBACK_QUEUE:-${GPU_QUEUE_PRO}}"
+GPU_RETRY_GMEM_BUMP_GB="${GPU_RETRY_GMEM_BUMP_GB:-20}"
 GPU_FALLBACK_MIN_GMEM="${GPU_FALLBACK_MIN_GMEM:-36}"
-GPU_FALLBACK_FRAGMENT_GMEM="${GPU_FALLBACK_FRAGMENT_GMEM:-39}"
+GPU_FALLBACK_FRAGMENT_GMEM="${GPU_FALLBACK_FRAGMENT_GMEM:-${GPU_QUEUE_PRO_MAX_GMEM}}"
 GPU_FALLBACK_MIN_MEM_GB="${GPU_FALLBACK_MIN_MEM_GB:-512}"
 GPU_FALLBACK_MIN_WALL_H="${GPU_FALLBACK_MIN_WALL_H:-12}"
+GPU_USAGE_POLL_SEC="${GPU_USAGE_POLL_SEC:-15}"
+if ! [[ "${GPU_RETRY_GMEM_BUMP_GB}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: GPU_RETRY_GMEM_BUMP_GB must be a non-negative integer (got: ${GPU_RETRY_GMEM_BUMP_GB})." >&2
+  exit 1
+fi
+if ! [[ "${GPU_QUEUE_PRO_MAX_GMEM}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: GPU_QUEUE_PRO_MAX_GMEM must be a non-negative integer (got: ${GPU_QUEUE_PRO_MAX_GMEM})." >&2
+  exit 1
+fi
+if ! [[ "${GPU_QUEUE_MAX_WALL_H}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: GPU_QUEUE_MAX_WALL_H must be a non-negative integer (got: ${GPU_QUEUE_MAX_WALL_H})." >&2
+  exit 1
+fi
 N_EPOCHS="${N_EPOCHS:-20}"
 SEGGER_BIN="${SEGGER_BIN:-segger}"
 CLUSTER_CODE_ROOT="${CLUSTER_CODE_ROOT:-${DEFAULT_CLUSTER_CODE_ROOT}}"
 SEGMENT_WALL_TIME_DEFAULT="${SEGMENT_WALL_TIME_DEFAULT:-6:00}"
+PREDICT_FRAGMENT_GMEM_GB="${PREDICT_FRAGMENT_GMEM_GB:-36}"
 EXPORT_WALL_TIME_DEFAULT="${EXPORT_WALL_TIME_DEFAULT:-6:00}"
+if ! [[ "${PREDICT_FRAGMENT_GMEM_GB}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: PREDICT_FRAGMENT_GMEM_GB must be a non-negative integer (got: ${PREDICT_FRAGMENT_GMEM_GB})." >&2
+  exit 1
+fi
 RUN_LABEL="${RUN_LABEL:-$(date '+%Y%m%d_%H%M%S')}"
 RUN_LABEL="$(printf '%s' "${RUN_LABEL}" | tr -cd '[:alnum:]_-')"
 if [[ -z "${RUN_LABEL}" ]]; then
@@ -1935,13 +2272,15 @@ mkdir -p "${OUTPUT_ROOT}/datasets" "${OUTPUT_ROOT}/summaries"
 
 printf "[%s] OUTPUT_ROOT=%s\n" "$(timestamp)" "${OUTPUT_ROOT}"
 printf "[%s] DATASET_KEYS=%s\n" "$(timestamp)" "${DATASET_KEYS}"
-printf "[%s] DRY_RUN=%s AUTO_SUBMIT=%s RUN_ANNDATA_EXPORT=%s RUN_XENIUM_EXPORT=%s SKIP_UNSUPPORTED_XENIUM_EXPORT=%s RUN_VALIDATION_TABLE=%s RUN_STATUS_SNAPSHOT=%s\n" \
-  "$(timestamp)" "${DRY_RUN}" "${AUTO_SUBMIT}" "${RUN_ANNDATA_EXPORT}" "${RUN_XENIUM_EXPORT}" "${SKIP_UNSUPPORTED_XENIUM_EXPORT}" "${RUN_VALIDATION_TABLE}" "${RUN_STATUS_SNAPSHOT}"
+printf "[%s] DRY_RUN=%s AUTO_SUBMIT=%s RUN_PRIMARY_JOBS=%s RUN_EXPORT_JOBS=%s RUN_ANNDATA_EXPORT=%s RUN_XENIUM_EXPORT=%s SKIP_UNSUPPORTED_XENIUM_EXPORT=%s RUN_VALIDATION_TABLE=%s RUN_STATUS_SNAPSHOT=%s\n" \
+  "$(timestamp)" "${DRY_RUN}" "${AUTO_SUBMIT}" "${RUN_PRIMARY_JOBS}" "${RUN_EXPORT_JOBS}" "${RUN_ANNDATA_EXPORT}" "${RUN_XENIUM_EXPORT}" "${SKIP_UNSUPPORTED_XENIUM_EXPORT}" "${RUN_VALIDATION_TABLE}" "${RUN_STATUS_SNAPSHOT}"
 printf "[%s] ENABLE_ALIGNMENT_JOBS=%s\n" "$(timestamp)" "${ENABLE_ALIGNMENT_JOBS}"
 printf "[%s] RESUME_IF_EXISTS=%s RESET_DATASET_ROOT=%s RUN_LABEL=%s\n" \
   "$(timestamp)" "${RESUME_IF_EXISTS}" "${RESET_DATASET_ROOT}" "${RUN_LABEL}"
 printf "[%s] FORCE_RERUN_FRAGMENT_JOBS=%s\n" \
   "$(timestamp)" "${FORCE_RERUN_FRAGMENT_JOBS}"
+printf "[%s] ONLY_RETRY_OOM_JOBS=%s\n" \
+  "$(timestamp)" "${ONLY_RETRY_OOM_JOBS}"
 printf "[%s] ALIGNMENT_REFERENCE_MODE=%s\n" "$(timestamp)" "${ALIGNMENT_REFERENCE_MODE}"
 printf "[%s] ALIGNMENT_SCRNA_CELLTYPE_COLUMN=%s\n" "$(timestamp)" "${ALIGNMENT_SCRNA_CELLTYPE_COLUMN}"
 if is_remote_submit_enabled; then
@@ -1959,14 +2298,20 @@ printf "[%s] SCRNA_REF_ROOT=%s\n" "$(timestamp)" "${SCRNA_REF_ROOT}"
 printf "[%s] SCRNA_CACHE_DIR=%s\n" "$(timestamp)" "${SCRNA_CACHE_DIR}"
 printf "[%s] AUTO_FETCH_SCRNA_REFS=%s FORCE_SCRNA_REFETCH=%s\n" \
   "$(timestamp)" "${AUTO_FETCH_SCRNA_REFS}" "${FORCE_SCRNA_REFETCH}"
-printf "[%s] SEGMENT_WALL_TIME_DEFAULT=%s EXPORT_WALL_TIME_DEFAULT=%s PRESERVE_PYTHONPATH=%s\n" \
-  "$(timestamp)" "${SEGMENT_WALL_TIME_DEFAULT}" "${EXPORT_WALL_TIME_DEFAULT}" "${PRESERVE_PYTHONPATH}"
+printf "[%s] SEGMENT_WALL_TIME_DEFAULT=%s EXPORT_WALL_TIME_DEFAULT=%s PREDICT_FRAGMENT_GMEM_GB=%s PRESERVE_PYTHONPATH=%s\n" \
+  "$(timestamp)" "${SEGMENT_WALL_TIME_DEFAULT}" "${EXPORT_WALL_TIME_DEFAULT}" "${PREDICT_FRAGMENT_GMEM_GB}" "${PRESERVE_PYTHONPATH}"
 printf "[%s] MAX_ACTIVE_STANDARD=%s MAX_ACTIVE_FRAGMENT=%s (currently informational)\n" \
   "$(timestamp)" "${MAX_ACTIVE_STANDARD}" "${MAX_ACTIVE_FRAGMENT}"
-printf "[%s] QUEUE_ROUTING route_eligible=%s gpu_default=%s gpu_pro=%s export=%s align_override=%s max_gmem=%sG max_mem=%sG\n" \
-  "$(timestamp)" "${ROUTE_ELIGIBLE_TO_GPU}" "${GPU_QUEUE_DEFAULT}" "${GPU_QUEUE_PRO}" "${EXPORT_QUEUE}" "${ALIGNMENT_GPU_QUEUE:-<none>}" "${GPU_QUEUE_MAX_GMEM}" "${GPU_QUEUE_MAX_MEM_GB}"
-printf "[%s] RETRY_FALLBACK enabled=%s queue=%s min_gmem=%sG fragment_min_gmem=%sG min_mem=%sG min_wall=%sh\n" \
-  "$(timestamp)" "${GPU_FALLBACK_ON_RETRY}" "${GPU_FALLBACK_QUEUE}" "${GPU_FALLBACK_MIN_GMEM}" "${GPU_FALLBACK_FRAGMENT_GMEM}" "${GPU_FALLBACK_MIN_MEM_GB}" "${GPU_FALLBACK_MIN_WALL_H}"
+printf "[%s] QUEUE_ROUTING route_eligible=%s gpu_default=%s gpu_pro=%s export=%s align_override=%s max_gmem=%sG pro_max_gmem=%sG max_mem=%sG max_wall=%sh\n" \
+  "$(timestamp)" "${ROUTE_ELIGIBLE_TO_GPU}" "${GPU_QUEUE_DEFAULT}" "${GPU_QUEUE_PRO}" "${EXPORT_QUEUE}" "${ALIGNMENT_GPU_QUEUE:-<none>}" "${GPU_QUEUE_MAX_GMEM}" "${GPU_QUEUE_PRO_MAX_GMEM}" "${GPU_QUEUE_MAX_MEM_GB}" "${GPU_QUEUE_MAX_WALL_H}"
+printf "[%s] FORCE_GPU_PRO_DATASETS=%s\n" \
+  "$(timestamp)" "${FORCE_GPU_PRO_DATASETS}"
+printf "[%s] RESUME_STATUS_CHECK require_success=%s allow_unverified=%s\n" \
+  "$(timestamp)" "${REQUIRE_SUCCESS_STATUS_FOR_RESUME}" "${ALLOW_UNVERIFIED_PRIMARY_OUTPUTS}"
+printf "[%s] RETRY_FALLBACK enabled=%s queue=%s gmem_bump=+%sG min_gmem=%sG fragment_min_gmem=%sG min_mem=%sG min_wall=%sh\n" \
+  "$(timestamp)" "${GPU_FALLBACK_ON_RETRY}" "${GPU_FALLBACK_QUEUE}" "${GPU_RETRY_GMEM_BUMP_GB}" "${GPU_FALLBACK_MIN_GMEM}" "${GPU_FALLBACK_FRAGMENT_GMEM}" "${GPU_FALLBACK_MIN_MEM_GB}" "${GPU_FALLBACK_MIN_WALL_H}"
+printf "[%s] GPU_USAGE_POLL_SEC=%s\n" \
+  "$(timestamp)" "${GPU_USAGE_POLL_SEC}"
 
 require_submit_transport
 require_segger_binary
@@ -2009,7 +2354,7 @@ while IFS= read -r dataset; do
 
   init_dataset_root "${dataset_root}"
   write_dataset_context "${dataset_root}" "${dataset}" "${input_dir}" "${scrna_ref}" "${tissue_type}"
-  write_dataset_plan "${dataset_root}"
+  write_dataset_plan "${dataset_root}" "${dataset}"
 
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
