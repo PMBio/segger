@@ -103,6 +103,34 @@ segger atlas list
 segger atlas clear --tissue colon
 ```
 
+## Key Parameters
+
+The most impactful parameters for segmentation quality:
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `--prediction-scale-factor` | 2.2 | Controls coverage vs. specificity. Higher = more transcripts assigned but more contamination |
+| `--fragment-mode` | off | Groups unassigned transcripts into fragment cells. Boosts assignment to ~95% but inflates MECR |
+| `--alignment-loss` | off | Penalizes ME-gene co-expression. Reduces MECR; use with `--scrna-reference-path` or `--tissue-type` |
+| `--alignment-loss-weight-end` | 0.03 | Alignment regularizer strength. Keep low (0.01–0.03); higher values risk training collapse |
+| `--segmentation-loss` | triplet | `triplet` produces cleaner thresholds; `bce` can be more stable |
+| `--min-similarity` | auto | Set explicitly (e.g. 0.5) to bypass per-gene auto-thresholding |
+| `--min-similarity-shift` | 0.0 | Post-hoc threshold relaxation. Use 0.05–0.15 to increase assignment without retraining |
+
+For detailed parameter guidance with empirical benchmarks, see the [`docs/`](docs/) folder.
+
+## Documentation
+
+The `docs/` folder contains detailed guides for each command:
+
+| Guide | Description |
+|-------|-------------|
+| [`docs/SEGMENT.md`](docs/SEGMENT.md) | Full parameter reference, loss system explanation, empirical parameter guide with runtime/memory |
+| [`docs/PREDICT.md`](docs/PREDICT.md) | Prediction-only mode, scale factor/fragment tuning, runtime estimates |
+| [`docs/EXPORT.md`](docs/EXPORT.md) | Export formats (Xenium Explorer, AnnData, SpatialData, merged), boundary methods |
+| [`docs/PLOT.md`](docs/PLOT.md) | Loss curve visualization, interpreting training metrics |
+| [`docs/VALIDATION_METRICS.md`](docs/VALIDATION_METRICS.md) | All 11 quality metrics with formulas, parameters, and output keys |
+
 ## Help per mode
 
 Use mode-specific help for the full parameter list:
