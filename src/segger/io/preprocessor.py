@@ -29,6 +29,7 @@ from .fields import (
     CosMxTranscriptFields,
     CosMxBoundaryFields,
 )
+from .filtering import apply_feature_filters
 
 
 # Ignore pandas warnings in CosMX transcripts file
@@ -621,8 +622,7 @@ class CosMXPreprocessor(ISTPreprocessor):
             )
 
         # Filter technical controls when feature labels look CosMx-like.
-        feature_expr = pl.col(feature_col).cast(pl.String, strict=False)
-        lf = lf.filter(feature_expr.str.contains("|".join(raw.filter_substrings)).fill_null(False).not_())
+        lf = apply_feature_filters(lf, feature_col, raw.filter_substrings)
 
         assignment_expr = _clean_assignment_expr(assignment_col)
         if compartment_col is not None:
@@ -877,8 +877,7 @@ class XeniumPreprocessor(ISTPreprocessor):
         if self.min_qv is not None and self.min_qv > 0 and quality_col is not None:
             lf = lf.filter(pl.col(quality_col) >= self.min_qv)
 
-        feature_expr = pl.col(feature_col).cast(pl.String, strict=False)
-        lf = lf.filter(feature_expr.str.contains("|".join(raw.filter_substrings)).fill_null(False).not_())
+        lf = apply_feature_filters(lf, feature_col, raw.filter_substrings)
 
         assignment_expr = _clean_assignment_expr(assignment_col)
         assignment_expr = (
@@ -1254,6 +1253,7 @@ class MerscopePreprocessor(ISTPreprocessor):
         quality_col = _first_existing(columns, [raw.quality, "qv"])
         if self.min_qv is not None and self.min_qv > 0 and quality_col is not None:
             lf = lf.filter(pl.col(quality_col) >= self.min_qv)
+        lf = apply_feature_filters(lf, feature_col, raw.filter_substrings)
 
         select_exprs: list[pl.Expr] = [
             pl.col(std.row_index),

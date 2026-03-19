@@ -158,6 +158,28 @@ def test_merscope_preprocessor_handles_duplicate_csv_headers(tmp_path: Path) -> 
     assert set(tx[std_tx.cell_id].drop_nulls().to_list()) == {"101", "202"}
 
 
+def test_merscope_preprocessor_filters_blank_codewords(tmp_path: Path) -> None:
+    preprocessor = _load_preprocessor_module()
+    pl = pytest.importorskip("polars")
+
+    tx_file = tmp_path / "detected_transcripts.csv"
+    pl.DataFrame(
+        {
+            "global_x": [0.0, 1.0, 2.0],
+            "global_y": [0.0, 1.0, 2.0],
+            "gene": ["ACTB", "BLANK_001", "GAPDH"],
+            "EntityID": [101, 101, 101],
+            "score": [0.9, 0.9, 0.9],
+        }
+    ).write_csv(tx_file)
+
+    pp = preprocessor.get_preprocessor(tmp_path, min_qv=0)
+    tx = pp.transcripts
+    std_tx = preprocessor.StandardTranscriptFields()
+
+    assert tx[std_tx.feature].to_list() == ["ACTB", "GAPDH"]
+
+
 def test_cosmx_preprocessor_supports_transcripts_parquet_schema(tmp_path: Path) -> None:
     preprocessor = _load_preprocessor_module()
     pl = pytest.importorskip("polars")
@@ -253,3 +275,30 @@ def test_xenium_preprocessor_falls_back_to_synthetic_boundaries(tmp_path: Path) 
         std_bd.cell_value,
         std_bd.nucleus_value,
     }
+
+
+def test_xenium_preprocessor_filters_control_codeword_globs(tmp_path: Path) -> None:
+    preprocessor = _load_preprocessor_module()
+    pl = pytest.importorskip("polars")
+
+    pl.DataFrame(
+        {
+            "x_location": [0.0, 1.0, 2.0, 3.0],
+            "y_location": [0.0, 1.0, 2.0, 3.0],
+            "feature_name": [
+                "ACTB",
+                "BLANK_001",
+                "NegControlCodeword123",
+                "DeprecatedCodeword_probe",
+            ],
+            "cell_id": ["c1", "c1", "c1", "c1"],
+            "overlaps_nucleus": [1, 0, 0, 0],
+            "qv": [40, 40, 40, 40],
+        }
+    ).write_parquet(tmp_path / "transcripts.parquet")
+
+    pp = preprocessor.get_preprocessor(tmp_path, min_qv=0)
+    tx = pp.transcripts
+    std_tx = preprocessor.StandardTranscriptFields()
+
+    assert tx[std_tx.feature].to_list() == ["ACTB"]

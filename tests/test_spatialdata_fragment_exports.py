@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
 pl = pytest.importorskip("polars")
 
 from segger.export import spatialdata_writer as spatialdata_writer_module
+from segger.io import spatialdata_loader as spatialdata_loader_module
 
 
 class _FakeSpatialData:
@@ -21,6 +23,13 @@ class _FakeSpatialData:
     @classmethod
     def init_from_elements(cls, points=None, shapes=None, tables=None):
         return cls(points=points, shapes=shapes, tables=tables)
+
+
+class _FakeSpatialDataStore:
+    def __init__(self, points=None, shapes=None):
+        self.points = points or {}
+        self.shapes = shapes or {}
+        self.attrs = {}
 
 
 class _FakePointsModel:
@@ -77,6 +86,25 @@ def _make_transcripts(cell_ids: list[str]) -> pl.DataFrame:
             "segger_cell_id": cell_ids,
         }
     )
+
+
+def _make_fake_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    points_df,
+) -> spatialdata_loader_module.SpatialDataLoader:
+    zarr_path = tmp_path / "sample.zarr"
+    zarr_path.mkdir()
+
+    fake_sdata = _FakeSpatialDataStore(points={"transcripts": points_df})
+    fake_spatialdata = types.SimpleNamespace(read_zarr=lambda _path: fake_sdata)
+    monkeypatch.setattr(
+        spatialdata_loader_module,
+        "require_spatialdata",
+        lambda: fake_spatialdata,
+    )
+    return spatialdata_loader_module.SpatialDataLoader(path=zarr_path)
 
 
 def test_spatialdata_writer_skips_fragment_shapes_and_table_when_none(monkeypatch):
@@ -157,3 +185,95 @@ def test_spatialdata_writer_emits_fragment_shapes_and_table_when_present(monkeyp
     assert writer.table_key in sdata.tables
     assert writer.fragment_table_key in sdata.tables
     assert table_calls == [1, 1]
+
+
+def test_spatialdata_loader_applies_xenium_codeword_and_qv_filters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pd = pytest.importorskip("pandas")
+
+    loader = _make_fake_loader(
+        monkeypatch,
+        tmp_path,
+        points_df=pd.DataFrame(
+            {
+                "x_location": [0.0, 1.0, 2.0, 3.0],
+                "y_location": [0.0, 1.0, 2.0, 3.0],
+                "feature_name": [
+                    "ACTB",
+                    "BLANK_001",
+                    "NegControlCodeword123",
+                    "GAPDH",
+                ],
+                "qv": [30.0, 30.0, 30.0, 5.0],
+                "cell_id": ["c1", "c1", "c1", "c1"],
+                "overlaps_nucleus": [1, 0, 0, 0],
+            }
+        ),
+    )
+
+    tx = loader.transcripts(
+        normalize=True,
+        min_qv=20.0,
+        apply_platform_filters=True,
+    ).collect()
+
+    assert loader.platform == "xenium"
+    assert tx["feature_name"].to_list() == ["ACTB"]
+
+
+def test_spatialdata_loader_applies_cosmx_control_filters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pd = pytest.importorskip("pandas")
+
+    loader = _make_fake_loader(
+        monkeypatch,
+        tmp_path,
+        points_df=pd.DataFrame(
+            {
+                "x_global_px": [0.0, 1.0, 2.0, 3.0],
+                "y_global_px": [0.0, 1.0, 2.0, 3.0],
+                "target": [
+                    "ACTB",
+                    "NegativeProbe_1",
+                    "SystemControl_1",
+                    "NegPrb_1",
+                ],
+                "cell": ["c1", "c1", "c1", "c1"],
+                "CellComp": ["Cytoplasm", "Cytoplasm", "Cytoplasm", "Cytoplasm"],
+            }
+        ),
+    )
+
+    tx = loader.transcripts(normalize=True, apply_platform_filters=True).collect()
+
+    assert loader.platform == "cosmx"
+    assert tx["feature_name"].to_list() == ["ACTB"]
+
+
+def test_spatialdata_loader_applies_merscope_blank_filters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pd = pytest.importorskip("pandas")
+
+    loader = _make_fake_loader(
+        monkeypatch,
+        tmp_path,
+        points_df=pd.DataFrame(
+            {
+                "global_x": [0.0, 1.0, 2.0],
+                "global_y": [0.0, 1.0, 2.0],
+                "gene": ["ACTB", "BLANK_001", "GAPDH"],
+                "EntityID": [101, 101, 101],
+            }
+        ),
+    )
+
+    tx = loader.transcripts(normalize=True, apply_platform_filters=True).collect()
+
+    assert loader.platform == "merscope"
+    assert tx["feature_name"].to_list() == ["ACTB", "GAPDH"]

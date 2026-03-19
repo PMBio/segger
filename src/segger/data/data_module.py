@@ -268,17 +268,10 @@ class ISTDataModule(LightningDataModule):
                 input_path,
                 boundary_type="all",
                 normalize=True,
+                min_qv=self.min_qv,
+                apply_platform_filters=True,
             )
             tx = tx_lf.collect() if isinstance(tx_lf, pl.LazyFrame) else tx_lf
-
-            # Keep behavior consistent with raw Xenium filtering when quality exists.
-            quality_col = getattr(tx_fields, "quality", "qv")
-            if (
-                self.min_qv is not None
-                and self.min_qv > 0
-                and quality_col in tx.columns
-            ):
-                tx = tx.filter(pl.col(quality_col) >= self.min_qv)
         else:
             pp = get_preprocessor(
                 self.input_directory,
